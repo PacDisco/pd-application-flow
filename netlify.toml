@@ -1,0 +1,33 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Public application flow. Everything under /api/* is a function; see the
+# `config.path` export in each function file for its exact routes.
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    # The flow can be embedded on www.pacificdiscovery.org. HubSpot's meeting
+    # scheduler and Stripe Checkout are the only third parties it talks to.
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://meetings.hubspot.com https://*.hubspot.com; connect-src 'self'; frame-ancestors 'self' https://www.pacificdiscovery.org https://pacificdiscovery.org https://dashboard.pacificdiscovery.org; form-action 'self' https://checkout.stripe.com"
+
+[[headers]]
+  for = "/form-kit.mjs"
+  [headers.values]
+    Content-Type = "text/javascript; charset=utf-8"
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/app.js"
+  [headers.values]
+    Cache-Control = "no-cache"
