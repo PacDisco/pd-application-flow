@@ -10,7 +10,7 @@ import { setupDb, memoryStore, fakeUpstreams } from './harness.mjs';
 Object.assign(process.env, {
   HUBSPOT_TOKEN: 'x', JOTFORM_API_KEY: 'x', STRIPE_SECRET_KEY: 'sk_test', STRIPE_WEBHOOK_SECRET: 'whsec_test',
   APPLY_SERVICE_KEY: 'svc', APPLY_SITE_URL: 'https://apply.example.org', URL: 'https://apply.example.org',
-  JOTFORM_MIRROR: 'on', HUBSPOT_SYNC: 'on',
+  JOTFORM_MIRROR: 'on', HUBSPOT_SYNC: 'on', SMTP_USER: 'apply@pacificdiscovery.org', SMTP_PASS: 'x',
 });
 
 const schema = JSON.parse(readFileSync(new URL('../scripts/seed-schema.json', import.meta.url)));
@@ -22,6 +22,8 @@ const apply = (await import('../netlify/functions/apply.mjs')).default;
 const service = (await import('../netlify/functions/service.mjs')).default;
 const webhook = (await import('../netlify/functions/stripe-webhook.mjs')).default;
 const file = (await import('../netlify/functions/file.mjs')).default;
+const mails = [];
+(await import('../netlify/functions/_lib/notify.mjs')).__setTransport({ sendMail: async (m) => { mails.push(m); return {}; } });
 
 let n = 0; const t = async (name, fn) => { await fn(); n++; console.log('  ✓', name); };
 const call = async (path, body, method = 'POST') => {
@@ -88,6 +90,16 @@ await t('step 1 creates the application, mirrors to Jotform and HubSpot', async 
   assert.equal(deal.properties.pd_program, 'South America Semester');
   assert.equal(deal.properties.travel_year, '2027'); assert.equal(deal.properties.amount, '15500');
   assert.equal(deal.properties.dealname, 'Maya Ortiz - South America Gap Semester');
+  // admissions alert
+  assert.equal(mails.length, 1);
+  assert.equal(mails[0].to, 'admissions@pacificdiscovery.org');
+  assert.equal(mails[0].replyTo, 'maya@example.com');
+  assert.match(mails[0].subject, /New application started: Maya Ortiz — South America Gap Semester \(Spring 2027\)/);
+  assert.match(mails[0].text, /Participant's email: maya@example\.com/);
+  assert.match(mails[0].text, /Program price: \$15,500/);
+  assert.match(mails[0].text, /Source: google/);
+  assert.match(mails[0].html, new RegExp(`record/0-1/${row.hubspot_contact_id}`));
+  assert.equal(row.sync.alert1.ok, true);
 });
 
 await t('cannot skip ahead to payment', async () => {
@@ -244,6 +256,11 @@ await t('Zap mode (HUBSPOT_SYNC=off): payment still finds the Zap-made deal', as
   const tok = s1.body.token;
   const [row0] = (await pool.query(`SELECT * FROM applications WHERE email = 'leo@example.com'`)).rows;
   assert.equal(row0.hubspot_deal_id, null); assert.equal(row0.jotform_step1_id, null);
+  // contact still created/updated at step 1 in Zap mode (existing one reused), and admissions alerted
+  assert.equal(row0.hubspot_contact_id, '900');
+  assert.equal(up.crm.contacts.get('900').properties.firstname, 'Leo');
+  assert.equal([...up.crm.contacts.values()].filter((c) => c.properties.email === 'leo@example.com').length, 1);
+  assert.ok(mails.some((m) => /Leo Park/.test(m.subject)));
   await call('step2', { token: tok, values: { ...step2, photo: [] } }).then((r) => assert.equal(r.status, 422)); // photo required
   const fd = new FormData(); fd.append('token', tok); fd.append('field', 'photo'); fd.append('file', new Blob([Buffer.from('p')], { type: 'image/png' }), 'p.png');
   const ph = await (await apply(new Request('https://apply.example.org/api/apply/upload', { method: 'POST', body: fd }), {})).json();

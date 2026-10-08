@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Pacific Discovery application flow \u2014 step 1, full application, interview booking and application-fee payment. Form fields are managed in the pd-dashboard Apply Form editor.",
+  "description": "Pacific Discovery application flow — step 1, full application, interview booking and application-fee payment. Form fields are managed in the pd-dashboard Apply Form editor.",
   "engines": {
     "node": ">=20"
   },
@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "@netlify/blobs": "^8.1.0"
+    "@netlify/blobs": "^8.1.0",
+    "nodemailer": "^6.10.1"
   },
   "devDependencies": {
     "pg": "^8.23.1",

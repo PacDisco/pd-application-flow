@@ -17,6 +17,7 @@ import * as K from "../../../public/form-kit.mjs";
 import * as HS from "./hubspot.mjs";
 import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
+import { alertOn, sendStep1Alert } from "./notify.mjs";
 
 export const mirrorOn = () => flag("JOTFORM_MIRROR", true);
 export const hubspotSyncOn = () => flag("HUBSPOT_SYNC", true);
@@ -193,19 +194,22 @@ async function syncOnce(app, schema, log) {
   }
 
   const hsReady = !!(process.env.HUBSPOT_TOKEN || process.env.HUBSPOT_API_KEY || process.env.HUBSPOT_PRIVATE_APP_TOKEN);
-  if (!hsReady) return out;
 
-  // ── HubSpot: contact + applicant deal (step 1) ───────────────────────────
-  if (hubspotSyncOn()) {
+  // ── HubSpot: contact (always, from step 1) + applicant deal ──────────────
+  // The contact is created/updated as soon as step 1 is in, in both modes —
+  // upsert-by-email, so it never duplicates a contact the Zap also touches.
+  // The deal is only created here when HUBSPOT_SYNC is on (otherwise the Zap
+  // makes it, and step 2 / payment find it).
+  if (hsReady) {
     try {
-      if (!app.hubspot_contact_id || (app.step2_at && !s.hsStep2)) {
+      if (!app.hubspot_contact_id || (app.step2_at && !s.hsStep2 && hubspotSyncOn())) {
         const props = { ...hubspotProps(schema, answers, "contact"), company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery" };
         const c = await HS.upsertContact(app.email, props);
         app.hubspot_contact_id = c.id;
-        await setSync(app.id, { hsContact: ok({ dropped: c.dropped }) }, { hubspot_contact_id: c.id });
+        await setSync(app.id, { hsContact: ok({ dropped: c.dropped, created: c.created }), hsError: undefined }, { hubspot_contact_id: c.id });
         out.hsContact = "ok";
       }
-      if (!app.hubspot_deal_id) {
+      if (hubspotSyncOn() && !app.hubspot_deal_id) {
         const deal = await createApplicantDeal(app, schema);
         app.hubspot_deal_id = deal.id;
         await setSync(app.id, { hsDeal: ok({ dropped: deal.dropped, reused: !!deal.reused }) }, { hubspot_deal_id: deal.id });
@@ -217,6 +221,18 @@ async function syncOnce(app, schema, log) {
       out.hubspot = err.message;
     }
   }
+
+  // ── Alert admissions: new step-1 applicant ───────────────────────────────
+  // Sent once, after the HubSpot contact attempt so the email can link to it.
+  if (app.step1_at && !s.alert1 && alertOn()) {
+    try {
+      const to = await sendStep1Alert(app, schema);
+      await setSync(app.id, { alert1: ok({ to }), alert1Error: undefined });
+      out.alert1 = "ok";
+    } catch (err) { log.error("[sync alert1]", err.message); await setSync(app.id, { alert1Error: fail(err) }); out.alert1 = err.message; }
+  }
+
+  if (!hsReady) return out;
 
   // ── HubSpot: full application in, fee not paid → PD Applications ─────────
   // Runs in both modes (HUBSPOT_SYNC on, or the Zap creating the deal): the

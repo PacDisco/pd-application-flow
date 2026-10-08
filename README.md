@@ -4,7 +4,7 @@ The four-step application flow, hosted on Netlify (e.g. `apply.pacificdiscovery.
 
 | Step | What the applicant does | What happens behind the scenes |
 |---|---|---|
-| 1 · About you | Name, DOB, email, mobile, gender, program, travel dates (mirrors Jotform form `251668678208874`) | Application row created in Neon. Mirrored into Jotform form 1. HubSpot contact upserted and a deal created in **PD Applications** (amount = program price, `pd_program`, `travel_year`). |
+| 1 · About you | Name, DOB, email, mobile, gender, program, travel dates (mirrors Jotform form `251668678208874`) | Application row created in Neon. Mirrored into Jotform form 1. HubSpot contact created or updated (always). With `HUBSPOT_SYNC=on`, a deal is created in **PD Applications** (amount = program price, `pd_program`, `travel_year`). An alert email goes to **admissions@pacificdiscovery.org** with their details and HubSpot links (reply-to is the applicant). |
 | 2 · Application | The full application (mirrors Jotform form `240277257210046`), incl. photo upload | Saved + mirrored into Jotform form 2 with the same field IDs (identity fields carried over from step 1). HubSpot contact updated with any mapped fields. Unless the fee is already paid, the deal is put in **PD Applications → Application Complete**. If neither pd-apply nor the Zap has made a deal yet, one is created there; if the Zap put it in another pipeline, it's moved. |
 | 3 · Interview | Books a time in the embedded HubSpot scheduler (`eda-admissions/pacific-discovery-interviews`), prefilled with name + email | The booking moves them on automatically. A note is added to the HubSpot contact/deal. |
 | 4 · Application fee | Pays **$250 + 3.5 % card fee = $258.75** via Stripe Checkout | Payment confirmed (return page + webhook, idempotent). Deal moved to the right **program pipeline** → **Application Fee Received**, with `pd_program`, `travel_year` and `payment_N = "250, pi_…, YYYY-MM-DD"`. |
@@ -61,6 +61,9 @@ The stage is the pipeline's "Application Fee Received" (or "…Paid") stage. `pd
    | `HUBSPOT_SYNC` | `on` (default) = pd-apply creates the contact + deal. **Turn the Zapier Zap off** at the same time (see below) |
    | `HUBSPOT_PAYMENT_SYNC` | `on` (default) = pipeline move + `payment_N` on payment |
    | `HUBSPOT_COMPANY_TAG` | optional, default `Pacific Discovery` |
+   | `SMTP_USER` / `SMTP_PASS` | the same Google Workspace mailbox + App Password the student portal uses for its emails. Needed for the admissions alert |
+   | `ADMISSIONS_ALERT_EMAIL` | optional, default `admissions@pacificdiscovery.org` (comma-separate several, `off` to disable) |
+   | `SMTP_FROM_NAME` | optional, default `Pacific Discovery Applications` |
    | `HUBSPOT_APPLICATION_PIPELINE` | optional; the application pipeline's name or ID, default `PD Applications` |
 
 4. **Domain:** add `apply.pacificdiscovery.org` to the site.
