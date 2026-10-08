@@ -92,3 +92,18 @@ t('enrolment facts', () => {
 });
 
 console.log(`\n${n} passed`);
+
+// student vs parent contact details must be unique
+{
+  const base = { email: 'kid@x.org', mobile: { cc: '1', number: '303 555 0100' }, hasPassport: 'No' };
+  const e1 = K.validateStep(schema, 'step2', { ...base, parent1Email: 'KID@x.org ', parent1Phone: { cc: '1', number: '(303) 555-0100' } }).errors;
+  assert.match(e1.parent1Email, /different from the student's email/);
+  assert.match(e1.parent1Phone, /different from the student's phone/);
+  const e2 = K.validateStep(schema, 'step2', { ...base, parent1Email: 'mum@x.org', parent2Email: 'mum@x.org', parent1Phone: { cc: '1', number: '720 555 0101' }, parent2Phone: { cc: '44', number: '0720 555 0101' } }).errors;
+  assert.ok(!e2.parent1Email && !e2.parent1Phone);
+  assert.match(e2.parent2Email, /primary parent\/guardian's email/);
+  assert.match(e2.parent2Phone, /primary parent\/guardian's phone/);
+  const e3 = K.validateStep(schema, 'step2', { ...base, parent1Email: 'mum@x.org', parent1Phone: { cc: '1', number: '720 555 0101' } }).errors;
+  assert.ok(!e3.parent1Email && !e3.parent1Phone && !e3.parent2Email);
+  console.log('  ✓ student and parent emails / phones must be unique');
+}

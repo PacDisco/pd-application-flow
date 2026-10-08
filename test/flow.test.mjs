@@ -123,6 +123,16 @@ await t('photo upload is stored against the application', async () => {
   assert.equal(bad.status, 400);
 });
 
+await t('step 2 refuses parent details that match the student', async () => {
+  const r = await call('step2', { token, values: { ...step2, photo: [photo], parent1Email: 'Maya@Example.com', parent1Phone: { cc: '1', number: '720-555-0199' } } });
+  assert.equal(r.status, 422);
+  assert.match(r.body.errors.parent1Email, /student's email/);
+  assert.match(r.body.errors.parent1Phone, /student's phone/);
+  const st = await call(`status?token=${token}`, null, 'GET');
+  assert.equal(st.body.step, 'step2', 'nothing saved');
+  assert.deepEqual(st.body.mobile, { cc: '1', number: '720 555 0199' });
+});
+
 await t('step 2 validates conditionals server-side', async () => {
   const { respiratoryDetails, ...missing } = step2;
   const r = await call('step2', { token, values: { ...missing, photo: [photo] } });

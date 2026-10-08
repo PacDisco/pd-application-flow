@@ -75,6 +75,12 @@ async function run(viewport, tag) {
   await page.selectOption('#fk_whoFound', 'You (the student)');
   await page.selectOption('#fk_shirtSize', 'Medium');
   await page.check('input[name=fk_criminalRecord][value=No]');
+  // parent can't reuse the student's email
+  await page.fill('#fk_parent1Email', `jules.${tag}@example.com`);
+  await page.click('button[type=submit]');
+  await page.waitForSelector('[data-key=parent1Email].fk-invalid');
+  assert.match(await page.locator('[data-key=parent1Email] .fk-error').textContent(), /student's email/);
+  await page.fill('#fk_parent1Email', 'kim@example.com');
   // submit without photo → error on photo
   await page.click('button[type=submit]');
   await page.waitForSelector('[data-key=photo].fk-invalid');

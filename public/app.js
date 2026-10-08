@@ -242,7 +242,8 @@ function showStep2() {
   // Conditions can reference step-1 answers (program/term), which the server
   // knows; for the browser they are not needed by the seeded form.
   S.form = renderStep($('#fields'), S.schema, 'step2', {
-    values: { ...draft, program: S.status?.program, term: S.status?.term },
+    // email / mobile: the student's, so parents can't reuse them (checked again on the server)
+    values: { ...draft, program: S.status?.program, term: S.status?.term, email: S.status?.email, mobile: S.status?.mobile || undefined },
     onChange: (v) => {
       // Keep an unsent draft for this tab only (no files, no cross-session storage).
       const { photo, ...rest } = v;

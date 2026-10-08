@@ -82,6 +82,7 @@ function statusBody(app, schema) {
     firstName: app.first_name,
     lastName: app.last_name,
     email: app.email,
+    mobile: app.answers?.mobile || null, // so step 2 can check parents' numbers differ
     program: app.program,
     term: app.term,
     interview: app.interview_at ? { at: app.interview_at, label: app.interview?.label || null } : null,
