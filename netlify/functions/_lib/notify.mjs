@@ -96,3 +96,50 @@ export async function sendStep1Alert(app, schema) {
   });
   return to;
 }
+
+/** "Interview needed" alert content (pure; tested). */
+export function interviewNeededContent(app, schema) {
+  const a = app.answers || {};
+  const fb = app.interview || {};
+  const name = `${app.first_name || ""} ${app.last_name || ""}`.trim() || app.email;
+  const phone = (v) => (v && v.number ? `${v.cc ? `+${v.cc} ` : ""}${v.number}` : "");
+  const rows = [
+    ["Reason", fb.reasonLabel || fb.reason || ""],
+    ...(fb.note ? [["Their note", fb.note]] : []),
+    ["Program", [app.program, app.term].filter(Boolean).join(" · ")],
+    ["Student email", app.email],
+    ["Student phone", phone(a.mobile)],
+    ...[1, 2].flatMap((n) => {
+      const nm = a[`parent${n}Name`]; const em = a[`parent${n}Email`];
+      if (!nm && !em) return [];
+      const who = n === 1 ? "Primary parent/guardian" : "Secondary parent/guardian";
+      return [[who, [nm ? `${nm.first || ""} ${nm.last || ""}`.trim() : "", em, phone(a[`parent${n}Phone`])].filter(Boolean).join(" · ")]];
+    }),
+  ].filter(([, v]) => v);
+  const dash = (process.env.DASHBOARD_URL || "https://dashboard.pacificdiscovery.org").replace(/\/+$/, "");
+  const links = [];
+  if (app.hubspot_contact_id) links.push(["Open contact in HubSpot", `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-1/${app.hubspot_contact_id}`]);
+  if (app.hubspot_deal_id) links.push(["Open deal in HubSpot", `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-3/${app.hubspot_deal_id}`]);
+  links.push(["See all applications", `${dash}/apply-form/`]);
+  const subject = `Interview needed: ${name}${app.program ? ` — ${app.program}` : ""}${app.term ? ` (${app.term})` : ""}`;
+  const intro = `${name} finished their application but couldn't book an interview online, so they've gone on to the application fee. Please contact them to arrange the interview.`;
+  const text = [intro, "", ...rows.map(([k, v]) => `${k}: ${v}`), "", ...links.map(([k, u]) => `${k}: ${u}`)].join("\n");
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#2f2f2f;max-width:620px">
+  <p style="font-size:16px;margin:0 0 12px">${esc(intro)}</p>
+  <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e1e6e8">
+    ${rows.map(([k, v]) => `<tr><td style="background:#f6f8f9;border-bottom:1px solid #e1e6e8;width:38%;color:#5f666b">${esc(k)}</td><td style="border-bottom:1px solid #e1e6e8;white-space:pre-wrap">${esc(v)}</td></tr>`).join("")}
+  </table>
+  <p>${links.map(([k, u]) => `<a href="${esc(u)}" style="color:#288195;margin-right:16px">${esc(k)}</a>`).join("")}</p>
+</div>`;
+  return { subject, text, html };
+}
+
+export async function sendInterviewNeededAlert(app, schema) {
+  const to = alertRecipients();
+  const { subject, text, html } = interviewNeededContent(app, schema);
+  await transport().sendMail({
+    from: `"${process.env.SMTP_FROM_NAME || "Pacific Discovery Applications"}" <${process.env.SMTP_USER}>`,
+    to: to.join(", "), replyTo: app.email, subject, text, html,
+  });
+  return to;
+}

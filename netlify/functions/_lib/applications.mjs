@@ -17,7 +17,7 @@ import * as K from "../../../public/form-kit.mjs";
 import * as HS from "./hubspot.mjs";
 import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
-import { alertOn, sendStep1Alert } from "./notify.mjs";
+import { alertOn, sendStep1Alert, sendInterviewNeededAlert } from "./notify.mjs";
 
 export const mirrorOn = () => flag("JOTFORM_MIRROR", true);
 export const hubspotSyncOn = () => flag("HUBSPOT_SYNC", true);
@@ -232,6 +232,24 @@ async function syncOnce(app, schema, log) {
       await setSync(app.id, { alert1: ok({ to }), alert1Error: undefined });
       out.alert1 = "ok";
     } catch (err) { log.error("[sync alert1]", err.message); await setSync(app.id, { alert1Error: fail(err) }); out.alert1 = err.message; }
+  }
+
+  // ── Interview fallback: "couldn't book" → tell admissions to arrange it ──
+  if (app.interview?.fallback && !app.interview_at && !s.interviewNeeded) {
+    const res = {}; const errs = [];
+    if (alertOn()) {
+      try { res.to = await sendInterviewNeededAlert(app, schema); } catch (err) { errs.push(`email: ${err.message}`); }
+    }
+    if (hsReady) {
+      try {
+        const { contactId, dealId } = await resolveHubspot(app, schema);
+        const fb = app.interview;
+        await HS.addNote(`<p><strong>Interview still needed</strong> — the applicant couldn't book through the online application (${escapeHtml(fb.reasonLabel || fb.reason || "")}).</p>${fb.note ? `<p>Their note: ${escapeHtml(fb.note)}</p>` : ""}<p>Please contact them to arrange the admissions interview.</p>`, { contactId, dealId });
+        res.hubspotNote = true;
+      } catch (err) { errs.push(`HubSpot note: ${err.message}`); }
+    }
+    if (errs.length) { await setSync(app.id, { interviewNeededError: { ok: false, at: new Date().toISOString(), error: errs.join("; ") } }); out.interviewNeeded = errs.join("; "); }
+    else { await setSync(app.id, { interviewNeeded: ok(res), interviewNeededError: undefined }); out.interviewNeeded = "ok"; }
   }
 
   if (!hsReady) return out;

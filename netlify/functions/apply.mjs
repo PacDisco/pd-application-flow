@@ -69,10 +69,24 @@ async function getSchema() {
 
 // ── status ─────────────────────────────────────────────────────────────────
 
+/** Has the interview step been dealt with (booked, skipped, or handed to admissions)? */
+export function interviewCleared(app, schema) {
+  if (app.interview_at) return true;
+  const st = schema?.settings || {};
+  if (app.interview?.skipped && st.allowSkipInterview) return true;
+  if (app.interview?.fallback && fallbackOn(schema)) return true;
+  return false;
+}
+
+/** The "Having trouble booking?" fallback is on unless switched off in the dashboard. */
+export function fallbackOn(schema) {
+  return schema?.settings?.interviewFallback !== false;
+}
+
 function nextStep(app, schema) {
   if (app.paid_at) return "done";
   if (!app.step2_at) return "step2";
-  if (!app.interview_at && !(schema?.settings?.allowSkipInterview && app.interview?.skipped)) return "interview";
+  if (!interviewCleared(app, schema)) return "interview";
   return "payment";
 }
 
@@ -86,6 +100,7 @@ function statusBody(app, schema) {
     program: app.program,
     term: app.term,
     interview: app.interview_at ? { at: app.interview_at, label: app.interview?.label || null } : null,
+    interviewNeeded: !app.interview_at && !!app.interview?.fallback, // admissions will arrange it
     paid: !!app.paid_at,
     paidAt: app.paid_at,
     fee: K.feeBreakdown(schema),
@@ -242,6 +257,23 @@ async function interview(req) {
   const { schema } = await publishedSchema();
   const b = body.booking && typeof body.booking === "object" ? body.booking : {};
   if (b.skipped && !schema.settings?.allowSkipInterview) throw bad("Please book your interview to continue.", 409);
+  if (b.fallback) {
+    // "Can't find a time / the calendar won't load" — continue to payment and
+    // tell admissions to arrange the interview by hand.
+    if (!fallbackOn(schema)) throw bad("Please book your interview to continue.", 409);
+    if (app.interview_at) return json({ status: statusBody(app, schema) });
+    const REASONS = { no_times: "No suitable times", wont_load: "The calendar wouldn't load", other: "Other" };
+    const fb = {
+      source: "fallback", fallback: true,
+      reason: REASONS[b.reason] ? b.reason : "other",
+      reasonLabel: REASONS[b.reason] || REASONS.other,
+      note: typeof b.note === "string" ? b.note.trim().slice(0, 1000) : "",
+      at: new Date().toISOString(),
+    };
+    const rows = await db()`UPDATE applications SET interview = ${JSON.stringify(fb)}, updated_at = now() WHERE id = ${app.id} RETURNING *`;
+    await A.triggerSync(app.id, { schema });
+    return json({ status: statusBody(rows[0] || { ...app, interview: fb }, schema) });
+  }
   const booking = {
     source: b.skipped ? "skipped" : "hubspot-meetings",
     skipped: !!b.skipped,
@@ -267,7 +299,7 @@ async function checkout(req) {
   if (app.paid_at) throw bad("Your application fee has already been paid.", 409);
   if (!app.step2_at) throw bad("Please finish your application first.", 409);
   const { schema } = await publishedSchema();
-  if (!app.interview_at && !(schema.settings?.allowSkipInterview && app.interview?.skipped)) {
+  if (!interviewCleared(app, schema)) {
     throw bad("Please book your interview first.", 409);
   }
   const fee = K.feeBreakdown(schema);

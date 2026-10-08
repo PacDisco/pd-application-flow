@@ -338,6 +338,34 @@ await t('Zap mode: full application with no payment lands in PD Applications / A
   process.env.HUBSPOT_SYNC = 'on'; process.env.JOTFORM_MIRROR = 'on';
 });
 
+await t('interview fallback: continue to payment, admissions emailed + HubSpot note', async () => {
+  const s1 = await call('start', { values: { ...step1, email: 'zoe@example.com', name: { first: 'Zoe', last: 'Kim' } } });
+  const tok = s1.body.token;
+  const fd = new FormData(); fd.append('token', tok); fd.append('field', 'photo'); fd.append('file', new Blob([Buffer.from('p')], { type: 'image/png' }), 'p.png');
+  const ph = await (await apply(new Request('https://apply.example.org/api/apply/upload', { method: 'POST', body: fd }), {})).json();
+  await call('step2', { token: tok, values: { ...step2, photo: [ph] } });
+  assert.equal((await call('checkout', { token: tok })).status, 409, 'still needs the interview step');
+  const notesBefore = up.crm.notes.length; const mailsBefore = mails.length;
+  const r = await call('interview', { token: tok, booking: { fallback: true, reason: 'wont_load', note: 'Evenings US Eastern please' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.status.step, 'payment');
+  assert.equal(r.body.status.interviewNeeded, true);
+  const m = mails.slice(mailsBefore).find((x) => /Interview needed: Zoe Kim/.test(x.subject));
+  assert.ok(m, 'admissions emailed');
+  assert.match(m.text, /The calendar wouldn't load/);
+  assert.match(m.text, /Evenings US Eastern please/);
+  assert.match(m.text, /Primary parent\/guardian: Rosa Ortiz · rosa@example\.com/);
+  assert.equal(up.crm.notes.length, notesBefore + 1, 'HubSpot note added');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Interview still needed/);
+  assert.equal((await call('checkout', { token: tok })).status, 200, 'can now pay');
+  const [row] = (await pool.query(`SELECT * FROM applications WHERE email = 'zoe@example.com'`)).rows;
+  assert.equal(row.interview_at, null);
+  assert.equal(row.sync.interviewNeeded.ok, true);
+  // a second click doesn't email again
+  await call('interview', { token: tok, booking: { fallback: true, reason: 'other' } });
+  assert.equal(mails.filter((x) => /Interview needed: Zoe Kim/.test(x.subject)).length, 1);
+});
+
 await t('rate limit: 8 applications per IP per hour', async () => {
   let last;
   for (let i = 0; i < 12; i += 1) last = await call('start', { values: { ...step1, email: `x${i}@example.com` } });

@@ -295,22 +295,69 @@ function meetingUrl() {
 
 function showInterview() {
   const t = texts();
+  const st = S.schema.settings || {};
+  const fallback = st.interviewFallback !== false;
   view.innerHTML = `
     ${helloLine()}
     <h1 class="serif">${esc(t.interviewTitle || 'Book your admissions interview')}</h1>
     <p class="lead">${esc(t.interviewBody || '')}</p>
     <div id="booked"></div>
-    <div class="meet" id="meet"><iframe title="Book your admissions interview" src="${esc(meetingUrl())}" loading="lazy" allow="clipboard-write"></iframe></div>
+    <div class="meet" id="meet"><iframe title="Book your admissions interview" src="${esc(meetingUrl())}" allow="clipboard-write"></iframe></div>
     <div class="actions">
       <span class="small">Once you pick a time you'll move straight on to the application fee.</span>
-      ${S.schema.settings.allowSkipInterview ? '<button type="button" class="btn" id="skip">Skip for now</button>' : ''}
-    </div>`;
+      ${st.allowSkipInterview ? '<button type="button" class="btn" id="skip">Skip for now</button>' : ''}
+    </div>
+    ${fallback ? `<div class="trouble hidden" id="trouble">
+      <button type="button" class="link" id="trouble-open" aria-expanded="false" aria-controls="trouble-form">Can't find a time that works, or the calendar won't load?</button>
+      <form id="trouble-form" class="trouble__form fk hidden" novalidate>
+        <p class="small">No problem — continue to the application fee and our admissions team will contact you to arrange your interview.</p>
+        <fieldset class="trouble__reasons"><legend class="sr">What's the problem?</legend>
+          <label class="fk-choice"><input type="radio" name="reason" value="no_times" checked> <span>No suitable times</span></label>
+          <label class="fk-choice"><input type="radio" name="reason" value="wont_load"> <span>The calendar won't load</span></label>
+          <label class="fk-choice"><input type="radio" name="reason" value="other"> <span>Something else</span></label>
+        </fieldset>
+        <label class="small" for="trouble-note">Anything we should know? (e.g. best days or times to reach you, time zone)</label>
+        <textarea id="trouble-note" rows="3" maxlength="1000"></textarea>
+        <button type="submit" class="btn btn--primary">Continue to the application fee →</button>
+      </form>
+    </div>` : ''}`;
   wireNotMe();
   $('#skip')?.addEventListener('click', async (e) => {
     busy(e.currentTarget, true);
     try { S.status = (await api('interview', { method: 'POST', body: { token: S.token, booking: { skipped: true } } })).status; route(); focusTop(); }
     catch (err) { busy(e.currentTarget, false); say('bad', esc(err.message)); }
   });
+  if (fallback) {
+    // Offer the fallback after a short wait — or straight away if the
+    // scheduler hasn't loaded (blocked by an ad blocker / network).
+    const reveal = (why) => {
+      const box = $('#trouble'); if (!box || !box.classList.contains('hidden')) return;
+      box.classList.remove('hidden');
+      if (why === 'noload') { $('#trouble-form').classList.remove('hidden'); $('#trouble-open').setAttribute('aria-expanded', 'true'); box.querySelector('input[value=wont_load]').checked = true; }
+      notifyParent();
+    };
+    let loaded = false;
+    $('#meet iframe').addEventListener('load', () => { loaded = true; });
+    setTimeout(() => reveal('delay'), Math.max(0, Number(st.interviewFallbackDelaySec ?? 30)) * 1000);
+    setTimeout(() => { if (!loaded) reveal('noload'); }, 15000);
+    $('#trouble-open').addEventListener('click', (e) => {
+      const f = $('#trouble-form'); const open = f.classList.toggle('hidden') === false;
+      e.currentTarget.setAttribute('aria-expanded', String(open));
+      if (open) f.querySelector('input:checked')?.focus();
+      notifyParent();
+    });
+    $('#trouble-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.currentTarget.querySelector('button[type=submit]');
+      busy(btn, true, 'Saving…');
+      try {
+        const reason = e.currentTarget.querySelector('input[name=reason]:checked')?.value || 'other';
+        const note = $('#trouble-note').value;
+        S.status = (await api('interview', { method: 'POST', body: { token: S.token, booking: { fallback: true, reason, note } } })).status;
+        route(); focusTop();
+      } catch (err) { busy(btn, false); say('bad', esc(err.message)); }
+    });
+  }
   notifyParent();
 }
 
@@ -344,6 +391,7 @@ function showPayment() {
   view.innerHTML = `
     ${helloLine()}
     ${S.status?.interview ? `<div class="booked"><span aria-hidden="true">✓</span><div><strong>Interview booked${S.status.interview.label ? ` — ${esc(S.status.interview.label)}` : ''}</strong>Check your email for the calendar invite.</div></div>` : ''}
+    ${S.status?.interviewNeeded ? '<div class="banner banner--info"><strong>Interview:</strong> our admissions team will contact you to arrange a time.</div>' : ''}
     <h1 class="serif">${esc(t.paymentTitle || 'Pay your application fee')}</h1>
     <p class="lead">${esc(t.paymentBody || '')}</p>
     <table class="fee" aria-label="Amount due">
@@ -394,6 +442,7 @@ function showDone() {
       <p class="lead">${esc(t.doneBody || '')}</p>
       ${S.status?.program ? `<p><span class="pill">${esc(S.status.program)}${S.status.term ? ` · ${esc(S.status.term)}` : ''}</span></p>` : ''}
       ${S.status?.interview?.label ? `<p class="small">Interview: ${esc(S.status.interview.label)}</p>` : ''}
+      ${S.status?.interviewNeeded ? '<p class="small">Our admissions team will be in touch to arrange your interview.</p>' : ''}
       <p><a class="btn" href="https://www.pacificdiscovery.org" target="_top">Back to pacificdiscovery.org</a></p>
     </div>`;
   notifyParent();

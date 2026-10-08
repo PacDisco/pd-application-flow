@@ -7,6 +7,7 @@ import { setupDb, memoryStore, fakeUpstreams, startServer } from './harness.mjs'
 
 Object.assign(process.env, { HUBSPOT_TOKEN: 'x', JOTFORM_API_KEY: 'x', STRIPE_SECRET_KEY: 'sk', APPLY_SERVICE_KEY: 'svc', APPLY_SITE_URL: 'http://localhost:8899', URL: 'http://localhost:8899' });
 const schema = JSON.parse(readFileSync(new URL('../scripts/seed-schema.json', import.meta.url)));
+schema.settings.interviewFallbackDelaySec = 1;
 const { pool } = await setupDb(schema);
 globalThis.__applyTestStore = memoryStore();
 const up = fakeUpstreams();
@@ -94,8 +95,20 @@ async function run(viewport, tag) {
   const frame = page.frameLocator('iframe[title="Book your admissions interview"]');
   assert.equal(await frame.locator('#who').textContent(), `jules.${tag}@example.com`, 'scheduler prefilled with email');
   await shot('4-interview');
-  await frame.locator('#book').click();
-  await page.waitForSelector('text=Pay your application fee', { timeout: 8000 });
+  if (tag === 'mobile') {
+    // "Can't find a time?" fallback instead of booking
+    await page.waitForSelector('#trouble:not(.hidden)', { timeout: 5000 });
+    await page.click('#trouble-open');
+    await page.check('#trouble-form input[value=no_times]');
+    await page.fill('#trouble-note', 'Weekends only');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/${tag}-4b-fallback.png`, fullPage: true });
+    await page.click('#trouble-form button[type=submit]');
+    await page.waitForSelector('text=Pay your application fee', { timeout: 8000 });
+    assert.match(await page.locator('#view').textContent(), /admissions team will contact you/);
+  } else {
+    await frame.locator('#book').click();
+    await page.waitForSelector('text=Pay your application fee', { timeout: 8000 });
+  }
   const total = await page.locator('.fee tr.total td:last-child').textContent();
   assert.equal(total, '$258.75');
   await shot('5-payment');
