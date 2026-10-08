@@ -142,6 +142,37 @@ try {
   console.log('  ✓ desktop flow');
   await run({ width: 390, height: 844 }, 'mobile');
   console.log('  ✓ mobile flow');
+  // preview mode: every screen, nothing saved or sent
+  {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const errors = []; page.on('pageerror', (e) => errors.push(e.message));
+    await page.route('https://fonts.googleapis.com/**', (r) => r.fulfill({ body: '', contentType: 'text/css' }));
+    await page.route('https://meetings.hubspot.com/**', (r) => r.fulfill({ contentType: 'text/html', body: '<p>scheduler</p>' }));
+    const before = (await pool.query('SELECT count(*)::int n FROM applications')).rows[0].n;
+    const callsBefore = up.calls.length;
+    await page.goto('http://localhost:8899/?preview=1');
+    await page.waitForSelector('.pvbar');
+    await page.check('#pv-fill');
+    await page.click('button[type=submit]');
+    await page.waitForSelector('text=Student Information Continued');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/preview-step2.png` });
+    await page.click('button[type=submit]');
+    await page.waitForSelector('iframe[title="Book your admissions interview"]');
+    await page.click('[data-go=payment]');
+    await page.click('#pay');
+    await page.waitForSelector('#pv-paid');
+    await page.click('#pv-paid');
+    await page.waitForSelector('text=Application complete');
+    await page.click('[data-go=step2]');
+    await page.waitForSelector('text=Student Information Continued');
+    const after = (await pool.query('SELECT count(*)::int n FROM applications')).rows[0].n;
+    assert.equal(after, before, 'preview saved nothing');
+    assert.equal(up.calls.slice(callsBefore).filter((c) => /hubapi|jotform|stripe/.test(c.host)).length, 0, 'no upstream calls');
+    assert.equal(await page.evaluate(() => localStorage.getItem('pd-apply-token')), null);
+    assert.deepEqual(errors, []);
+    await page.close();
+    console.log('  ✓ preview mode');
+  }
 } finally {
   await browser.close(); server.close(); up.restore(); await pool.end();
 }

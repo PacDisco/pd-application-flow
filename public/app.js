@@ -16,7 +16,7 @@ const $ = (s) => document.querySelector(s);
 const view = $('#view');
 const banner = $('#banner');
 
-const S = { schema: null, token: null, status: null, form: null };
+const S = { schema: null, token: null, status: null, form: null, preview: false, prefill: {} };
 
 // ── storage (never fatal) ───────────────────────────────────────────────────
 const store = {
@@ -27,6 +27,7 @@ const store = {
 
 // ── api ─────────────────────────────────────────────────────────────────────
 async function api(path, { method = 'GET', body, form } = {}) {
+  if (S.preview && method !== 'GET') return previewApi(path, body, form);
   const res = await fetch(`/api/apply/${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : {},
@@ -120,9 +121,10 @@ async function boot() {
 
   // A token in the URL (Stripe return, "continue your application" links)
   // moves into storage and out of the address bar.
-  const urlToken = url.searchParams.get('token');
+  S.preview = url.searchParams.get('preview') === '1';
+  const urlToken = S.preview ? null : url.searchParams.get('token');
   if (urlToken) store.set(TOKEN_KEY, urlToken);
-  S.token = store.get(TOKEN_KEY);
+  S.token = S.preview ? 'preview' : store.get(TOKEN_KEY);
   const sessionId = url.searchParams.get('session_id');
   const cancelled = url.searchParams.get('cancelled');
   if (url.searchParams.has('token') || sessionId || cancelled) {
@@ -135,6 +137,11 @@ async function boot() {
     S.schema = schema;
   } catch (err) {
     view.innerHTML = `<h1 class="serif">Applications are temporarily unavailable</h1><p class="lead">${esc(err.message)}</p><p>Please email <a href="mailto:info@pacificdiscovery.org">info@pacificdiscovery.org</a> and we'll help you apply.</p>`;
+    return;
+  }
+
+  if (S.preview) {
+    startPreview(url);
     return;
   }
 
@@ -167,7 +174,7 @@ function route(attr = captureAttribution(new URL(location.href))) {
 function helloLine() {
   const st = S.status;
   if (!st) return '';
-  return `<p class="hello"><span>Applying as <strong>${esc(st.firstName)} ${esc(st.lastName)}</strong></span>${st.program ? `<span class="pill">${esc(st.program)}${st.term ? ` · ${esc(st.term)}` : ''}</span>` : ''}<button type="button" class="link" id="notme">Not you? Start a new application</button></p>`;
+  return `<p class="hello"><span>Applying as <strong>${esc(st.firstName)} ${esc(st.lastName)}</strong></span>${st.program ? `<span class="pill">${esc(st.program)}${st.term ? ` · ${esc(st.term)}` : ''}</span>` : ''}${S.preview ? '' : '<button type="button" class="link" id="notme">Not you? Start a new application</button>'}</p>`;
 }
 
 function wireNotMe() {
@@ -200,7 +207,7 @@ function showStep1(attr) {
       <div class="hp" aria-hidden="true"><label>Leave this empty<input name="website" tabindex="-1" autocomplete="off"></label></div>
       <div class="actions"><span class="small">Takes about 2 minutes.</span><button class="btn btn--primary" type="submit">${esc(st?.submitLabel || 'Next')} →</button></div>
     </form>`;
-  S.form = renderStep($('#fields'), S.schema, 'step1', { onChange: notifyParent });
+  S.form = renderStep($('#fields'), S.schema, 'step1', { values: S.prefill.step1 || {}, onChange: notifyParent });
   $('#f').addEventListener('submit', async (e) => {
     e.preventDefault();
     say('', '');
@@ -211,7 +218,7 @@ function showStep1(attr) {
     try {
       const out = await api('start', { method: 'POST', body: { values: { ...S.form.values(), ...hiddenValues(attr) }, hp: $('#f [name=website]').value, attribution: attr } });
       S.token = out.token;
-      store.set(TOKEN_KEY, out.token);
+      if (!S.preview) store.set(TOKEN_KEY, out.token);
       S.status = out.status;
       route();
       focusTop();
@@ -243,11 +250,11 @@ function showStep2() {
   // knows; for the browser they are not needed by the seeded form.
   S.form = renderStep($('#fields'), S.schema, 'step2', {
     // email / mobile: the student's, so parents can't reuse them (checked again on the server)
-    values: { ...draft, program: S.status?.program, term: S.status?.term, email: S.status?.email, mobile: S.status?.mobile || undefined },
+    values: { ...draft, ...(S.prefill.step2 || {}), program: S.status?.program, term: S.status?.term, email: S.status?.email, mobile: S.status?.mobile || undefined },
     onChange: (v) => {
       // Keep an unsent draft for this tab only (no files, no cross-session storage).
       const { photo, ...rest } = v;
-      store.set(DRAFT_KEY, JSON.stringify(rest), sessionStorage);
+      if (!S.preview) store.set(DRAFT_KEY, JSON.stringify(rest), sessionStorage);
       notifyParent();
     },
     upload: async (file, field) => {
@@ -408,7 +415,8 @@ function showPayment() {
     const btn = e.currentTarget;
     busy(btn, true, 'Opening secure checkout…');
     try {
-      const { url } = await api('checkout', { method: 'POST', body: { token: S.token } });
+      const { url, preview } = await api('checkout', { method: 'POST', body: { token: S.token } });
+      if (preview) { busy(btn, false); say('info', `<strong>Preview:</strong> this is where the applicant goes to Stripe Checkout to pay ${money((S.status?.fee || S.schema.fee).total)}. <button type="button" class="link" id="pv-paid">Show the "paid" screen</button>`); $('#pv-paid').onclick = () => previewGo('done'); return; }
       if (window.top !== window) window.top.location.href = url; else location.href = url;
     } catch (err) {
       busy(btn, false);
@@ -449,3 +457,101 @@ function showDone() {
 }
 
 boot();
+
+
+// ── preview mode (?preview=1) ───────────────────────────────────────────────
+// Click through every screen without saving anything: no application is
+// created, nothing goes to HubSpot, Jotform, Stripe or email. Field checks
+// still run, so it's also how to test the form after editing it.
+
+function sampleValues(stepKey) {
+  const out = {};
+  const words = { text: 'Test answer', textarea: 'Test answer — preview only.', number: '150' };
+  let n = 0;
+  for (const st of S.schema.steps) {
+    if (st.key !== stepKey) continue;
+    for (const sec of st.sections) for (const f of sec.fields) {
+      if (['html', 'hidden'].includes(f.type) || f.hidden) continue;
+      if (f.type === 'file') { out[f.key] = [{ id: 'preview', name: 'test-photo.jpg', size: 1, type: 'image/jpeg' }]; continue; }
+      n += 1;
+      const opts = f.optionsFrom === 'programs' ? S.schema.programs.map((p) => p.name)
+        : f.optionsFrom === 'countries' ? ['United States'] : (f.options || []);
+      switch (f.type) {
+        case 'fullname': out[f.key] = f.key === 'name' ? { first: 'Test', last: 'Applicant' } : { first: 'Parent', last: `Test ${n}` }; break;
+        case 'email': out[f.key] = f.key === 'email' ? 'preview.student@example.com' : `preview.${f.key.toLowerCase()}@example.com`; break;
+        case 'phone': out[f.key] = { cc: '1', number: `303 555 0${String(100 + n).slice(-3)}` }; break;
+        case 'date': out[f.key] = f.key === 'dob' ? '2007-05-14' : '2031-01-31'; break;
+        case 'address': out[f.key] = { addr_line1: '1 Test Street', city: 'Boulder', state: 'CO', postal: '80302' }; break;
+        case 'select': case 'radio': out[f.key] = opts.includes('No') ? 'No' : (opts.includes('United States') ? 'United States' : opts[0]); break;
+        case 'checkbox': break;
+        default: out[f.key] = words[f.type] || 'Test';
+      }
+    }
+  }
+  if (stepKey === 'step1') {
+    const prog = S.schema.programs.find((p) => p.type !== 'summer') || S.schema.programs[0];
+    out.program = prog?.name;
+    const term = S.schema.terms.find((t) => (prog?.type === 'summer' ? t.season === 'Summer' : t.season !== 'Summer'));
+    out.term = term?.label;
+  }
+  return out;
+}
+
+function previewStatus(step) {
+  const s1 = S.prefill.step1 || sampleValues('step1');
+  return {
+    step,
+    firstName: s1.name?.first || 'Test', lastName: s1.name?.last || 'Applicant',
+    email: s1.email || 'preview.student@example.com', mobile: s1.mobile || { cc: '1', number: '303 555 0100' },
+    program: s1.program, term: s1.term,
+    interview: step === 'payment' || step === 'done' ? { label: 'Tuesday, 9:00 AM (preview)' } : null,
+    interviewNeeded: false, paid: step === 'done', fee: S.schema.fee,
+  };
+}
+
+function previewGo(step) {
+  S.status = previewStatus(step);
+  say('', '');
+  route();
+  focusTop();
+}
+
+function previewApi(path, body, form) {
+  const route_ = path.split('?')[0];
+  const ok = (o) => Promise.resolve(o);
+  if (route_ === 'start') { S.prefill.step1 = body?.values; return ok({ token: 'preview', status: previewStatus('step2') }); }
+  if (route_ === 'step2') return ok({ status: previewStatus('interview') });
+  if (route_ === 'upload') { const f = form?.get?.('file'); return ok({ id: 'preview', name: f?.name || 'photo.jpg', size: f?.size || 0, type: f?.type || 'image/jpeg' }); }
+  if (route_ === 'interview') {
+    const st = previewStatus('payment');
+    if (body?.booking?.fallback) { st.interview = null; st.interviewNeeded = true; }
+    else if (body?.booking?.label) st.interview = { label: `${body.booking.label} (preview — a real booking was made in HubSpot)` };
+    return ok({ status: st });
+  }
+  if (route_ === 'checkout') return ok({ preview: true });
+  return ok({});
+}
+
+function startPreview(url) {
+  const bar = document.createElement('div');
+  bar.className = 'pvbar';
+  bar.innerHTML = `<strong>Preview mode</strong> — nothing is saved or sent (no HubSpot, Jotform, email or payment).
+    <span class="pvbar__jump">Jump to:
+      <button type="button" data-go="step1">1 · About you</button>
+      <button type="button" data-go="step2">2 · Application</button>
+      <button type="button" data-go="interview">3 · Interview</button>
+      <button type="button" data-go="payment">4 · Fee</button>
+      <button type="button" data-go="done">Done</button>
+    </span>
+    <label class="pvbar__fill"><input type="checkbox" id="pv-fill"> Fill in test answers</label>`;
+  document.body.prepend(bar);
+  bar.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => previewGo(b.dataset.go)));
+  const fill = bar.querySelector('#pv-fill');
+  fill.addEventListener('change', () => {
+    S.prefill = fill.checked ? { step1: sampleValues('step1'), step2: sampleValues('step2') } : {};
+    previewGo(S.status?.step || 'step1');
+  });
+  const start = url.searchParams.get('step');
+  S.status = previewStatus(['step1', 'step2', 'interview', 'payment', 'done'].includes(start) ? start : 'step1');
+  route();
+}

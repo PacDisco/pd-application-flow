@@ -105,6 +105,17 @@ Archived or disabled Jotform forms don't count toward the form limit. But while 
 
 Jotform notification and autoresponder emails can fire on mirrored submissions. Check those after launch, and recreate any you rely on in HubSpot before switching the mirror off.
 
+## Testing the flow by hand (preview mode)
+
+Open `https://apply.pacificdiscovery.org/?preview=1` (or **Test the flow ↗** in the dashboard editor). A yellow bar lets you jump to any screen, and **Fill in test answers** pre-fills both forms. You can also go straight to a screen with `&step=step2|interview|payment|done`.
+
+Nothing is saved or sent in preview: no application is created, and nothing goes to HubSpot, Jotform, Stripe or email. Field checks still run. Two notes:
+
+- Preview shows the **published** form, so publish your edits first.
+- The interview step embeds the real HubSpot scheduler, so booking a time there makes a real meeting. Use **Jump to → 4 · Fee** to skip past it.
+
+For a full end-to-end test (HubSpot, alerts, real payment), use a real test application with your own email, then mark it **withdrawn** in the dashboard and delete the test contact and deal in HubSpot.
+
 ## Service API (for the portals and dashboard)
 
 Every call needs the header `x-apply-key: $APPLY_SERVICE_KEY`.
