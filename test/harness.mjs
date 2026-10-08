@@ -42,6 +42,14 @@ export function fakeUpstreams({ pdOptions } = {}) {
       { id: '74958085', label: 'Fall Mini Semester', stages: [{ id: 'fm9', label: 'Application Fee Received' }] },
       { id: '74755425', label: 'Spring Mini Semester', stages: [{ id: 'sm9', label: 'Application Fee Received' }] },
     ],
+    assocLog: [],
+    programs: [
+      { id: '54796059552', properties: { program_name: 'Global defaults' } },
+      { id: 'P1', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2027-02-03' } },
+      { id: 'P2', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2026-09-02' } },
+      { id: 'P3', properties: { pacific_discovery_program: 'Bali Summer Program', program_start_date: '2027-06-20' } },
+      { id: 'P4', properties: { pacific_discovery_program: 'Costa Rica Mini Semester', program_start_date: '2027-09-10' } },
+    ],
     pdOptions: pdOptions || [{ value: 'Bali Summer Program', label: 'Bali Summer Program' }, { value: 'South America Semester', label: 'South America Semester' }],
   };
   const jot = { subs: new Map(), seq: 6000 };
@@ -90,6 +98,16 @@ export function fakeUpstreams({ pdOptions } = {}) {
       }
       if (p === '/crm/v3/objects/deals/batch/read') return J({ results: b.inputs.map((i) => crm.deals.get(i.id)).filter(Boolean) });
       if (p === '/crm/v3/objects/notes') { crm.notes.push(b); return J({ id: 'n1' }); }
+      if (p === '/crm/v4/associations/contacts/contacts/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 51, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 52, label: 'Child' }] });
+      if (p === '/crm/v4/associations/deals/contacts/labels') return J({ results: [{ category: 'HUBSPOT_DEFINED', typeId: 3, label: null }, { category: 'USER_DEFINED', typeId: 61, label: 'Student' }, { category: 'USER_DEFINED', typeId: 62, label: 'Parent' }] });
+      if (p === '/crm/v4/associations/contacts/2-58411705/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 71, label: 'Student' }, { category: 'USER_DEFINED', typeId: 72, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 28, label: 'Instructor' }] });
+      if (p === '/crm/v3/objects/2-58411705') return J({ results: crm.programs });
+      if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/(default\/)?([^/]+)\/([^/]+)$/.exec(p)) && method === 'PUT') {
+        const [, from, fromId, dflt, to, toId] = m;
+        const types = dflt ? [null] : b.map((t) => t.associationTypeId);
+        for (const typeId of types) crm.assocLog.push({ from, fromId, to, toId, typeId });
+        return J({ ok: true });
+      }
       return J({ message: `fake hubspot: unhandled ${method} ${p}` }, 404);
     }
 

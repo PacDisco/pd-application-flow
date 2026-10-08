@@ -70,4 +70,28 @@ t('badProperties reads HubSpot validation errors', () => {
   const body = { status: 'error', message: 'Property values were not valid: [{"isValid":false,"message":"Property \\"bogus_prop\\" does not exist","error":"PROPERTY_DOESNT_EXIST","name":"bogus_prop","localizedErrorMessage":"Property \\"bogus_prop\\" does not exist","portalId":3855728},{"isValid":false,"message":"Japan Summer was not one of the allowed options","error":"INVALID_OPTION","name":"pd_program"}]', category: 'VALIDATION_ERROR' };
   assert.deepEqual(badProperties({ body }).sort(), ['bogus_prop', 'pd_program']);
 });
+t('program record matching: name + season + year, ambiguity is refused', () => {
+  const recs = [
+    { id: '54796059552', properties: { program_name: 'South America Semester' } },
+    { id: 'A', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2027-02-03' } },
+    { id: 'B', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2026-09-02' } },
+    { id: 'C', properties: { pacific_discovery_program: 'Costa Rica Mini Semester', program_start_date: '2027-03-01' } },
+    { id: 'D', properties: { pacific_discovery_program: 'Costa Rica Summer Program', program_start_date: '2027-06-20' } },
+    { id: 'E', properties: { program_name: 'Bali Summer Program 2027' } },
+    { id: 'F', properties: { program_name: 'Bali Summer 2027 (B)' , program_start_date: '2027-07-01'} },
+  ];
+  assert.equal(R.matchProgramRecord(recs, { program: 'South America Gap Semester', programType: 'semester', season: 'Spring', year: '2027' }).record.id, 'A');
+  assert.equal(R.matchProgramRecord(recs, { program: 'South America Gap Semester', programType: 'semester', season: 'Fall', year: '2026' }).record.id, 'B');
+  assert.equal(R.matchProgramRecord(recs, { program: 'Costa Rica Mini Semester', programType: 'mini', season: 'Spring', year: '2027' }).record.id, 'C');
+  assert.equal(R.matchProgramRecord(recs, { program: 'Costa Rica Summer Program', programType: 'summer', season: 'Summer', year: '2027' }).record.id, 'D');
+  assert.equal(R.matchProgramRecord(recs, { program: 'Japan Mini Semester', programType: 'mini', season: 'Spring', year: '2027' }).record, null);
+  const amb = R.matchProgramRecord(recs, { program: 'Bali Summer Program', programType: 'summer', season: 'Summer', year: '2027' });
+  assert.ok(amb.record === null || amb.record.id === 'E', 'two Bali 2027 records: either refused or the exact-name one');
+  assert.equal(R.seasonFromDate('2027-01-28'), 'Spring'); assert.equal(R.seasonFromDate('2027-06-15'), 'Summer'); assert.equal(R.seasonFromDate('2027-08-30'), 'Fall');
+});
+t('parent contacts from the answers', () => {
+  const ps = R.parentContacts({ parent1Email: 'MUM@x.org', parent1Name: { first: 'A', last: 'B' }, parent1Phone: { cc: '64', number: '21 555' }, parent2Email: 'kid@x.org' }, 'kid@x.org');
+  assert.equal(ps.length, 1);
+  assert.equal(ps[0].props.email, 'mum@x.org'); assert.equal(ps[0].props.phone, '+64 21 555');
+});
 console.log(`\n${n} passed`);

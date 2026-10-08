@@ -154,6 +154,26 @@ await t('step 2 saves, mirrors the full application, moves the deal', async () =
   assert.ok(!('128' in row.jf_step2.answers));
 });
 
+await t('application submitted: parents created and linked to student, deal and program record', async () => {
+  const [row] = (await pool.query('SELECT * FROM applications WHERE id = $1', [appId])).rows;
+  const parent = [...up.crm.contacts.values()].find((c) => c.properties.email === 'rosa@example.com');
+  assert.ok(parent, 'parent contact created');
+  assert.equal(parent.properties.firstname, 'Rosa');
+  assert.equal(parent.properties.phone, '+1 720 555 0100');
+  assert.equal(parent.properties.city, 'Boulder');
+  const has = (from, fromId, to, toId, typeId) => up.crm.assocLog.some((a) => a.from === from && a.fromId === String(fromId) && a.to === to && a.toId === String(toId) && a.typeId === typeId);
+  const sid = row.hubspot_contact_id, did = row.hubspot_deal_id, pid = parent.id;
+  assert.ok(has('contacts', pid, 'contacts', sid, 51), 'parent → student labelled Parent');
+  assert.ok(has('deals', did, 'contacts', sid, 61), 'deal → student labelled Student');
+  assert.ok(has('deals', did, 'contacts', pid, 62), 'deal → parent labelled Parent');
+  assert.ok(has('contacts', sid, '2-58411705', 'P1', 71), 'student → Spring 2027 South America record, Student');
+  assert.ok(has('contacts', pid, '2-58411705', 'P1', 72), 'parent → program record, Parent');
+  assert.ok(has('deals', did, '2-58411705', 'P1', null), 'deal → program record');
+  assert.ok(!up.crm.assocLog.some((a) => a.toId === 'P2'), 'not the Fall 2026 departure');
+  assert.equal(row.sync.hsProgram.record.id, 'P1');
+  assert.equal(row.sync.hsFamily.parents.length, 1, 'no secondary parent given');
+});
+
 await t('status never returns step-2 answers', async () => {
   const r = await call(`status?token=${token}`, null, 'GET');
   assert.equal(r.body.step, 'interview');
@@ -294,6 +314,8 @@ await t('Zap mode: full application with no payment lands in PD Applications / A
   assert.equal(d.travel_year, '2027'); assert.equal(d.amount, '10500');
   const [row] = (await pool.query(`SELECT * FROM applications WHERE email = 'nia@example.com'`)).rows;
   assert.equal(row.hubspot_deal_id, '951'); assert.equal(row.sync.hsStep2.pipeline, 'PD Applications');
+  assert.equal(row.sync.hsProgram.record.id, 'P4', 'Costa Rica Mini, Fall 2027 record');
+  assert.ok(up.crm.assocLog.some((a) => a.from === 'deals' && a.fromId === '951' && a.toId === 'P4'));
 
   // no Zap deal at all → one is created in PD Applications
   const s2 = await call('start', { values: { ...step1, email: 'omar@example.com', name: { first: 'Omar', last: 'Diaz' } } });

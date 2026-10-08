@@ -169,3 +169,60 @@ export async function addNote(html, { contactId, dealId } = {}) {
   if (dealId) associations.push({ to: { id: String(dealId) }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 214 }] });
   return hs("/crm/v3/objects/notes", { method: "POST", body: { properties: { hs_note_body: html, hs_timestamp: new Date().toISOString() }, associations } });
 }
+
+// ── associations ───────────────────────────────────────────────────────────
+
+const _labels = new Map();
+/** Association types between two object types: [{ category, typeId, label }]. */
+export async function associationLabels(fromType, toType) {
+  const key = `${fromType}>${toType}`;
+  const hit = _labels.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.list;
+  const data = await hs(`/crm/v4/associations/${fromType}/${toType}/labels`);
+  const list = (data?.results || []).map((r) => ({ category: r.category, typeId: Number(r.typeId), label: r.label || null }));
+  _labels.set(key, { at: Date.now(), list });
+  return list;
+}
+
+/** Find a labelled association type: exact label first, then a regex fallback. */
+export async function findLabel(fromType, toType, exact, fallbackRe) {
+  const list = await associationLabels(fromType, toType).catch(() => []);
+  const want = String(exact || "").trim().toLowerCase();
+  return list.find((l) => (l.label || "").trim().toLowerCase() === want)
+    || (fallbackRe ? list.find((l) => fallbackRe.test(l.label || "") && !/dnu|do not use/i.test(l.label || "")) : null)
+    || null;
+}
+
+/**
+ * Associate two records. With `type` ({category,typeId}) the labelled
+ * association is added (on top of the default one); without it, the default
+ * unlabelled association is created. Both calls are idempotent.
+ */
+export async function associate(fromType, fromId, toType, toId, type = null) {
+  await hs(`/crm/v4/objects/${fromType}/${fromId}/associations/default/${toType}/${toId}`, { method: "PUT" });
+  if (type) {
+    await hs(`/crm/v4/objects/${fromType}/${fromId}/associations/${toType}/${toId}`, {
+      method: "PUT",
+      body: [{ associationCategory: type.category || "USER_DEFINED", associationTypeId: Number(type.typeId) }],
+    });
+  }
+}
+
+let _programs = null;
+/** Every Pacific Discovery program record (cached 10 minutes). */
+export async function programRecords(objectType) {
+  if (_programs && Date.now() - _programs.at < 10 * 60 * 1000) return _programs.list;
+  const props = ["pacific_discovery_program", "program_name", "portal_title", "program_start_date", "program_end_date"];
+  const list = [];
+  let after = null;
+  for (let i = 0; i < 50; i += 1) {
+    const qs = new URLSearchParams({ limit: "100", properties: props.join(",") });
+    if (after) qs.set("after", after);
+    const page = await hs(`/crm/v3/objects/${objectType}?${qs}`);
+    list.push(...(page?.results || []));
+    after = page?.paging?.next?.after || null;
+    if (!after) break;
+  }
+  _programs = { at: Date.now(), list };
+  return list;
+}

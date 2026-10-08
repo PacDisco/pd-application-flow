@@ -107,8 +107,10 @@ export async function markPaid(appId, payment) {
 }
 
 async function setSync(id, patch, cols = {}) {
-  const sets = ["sync = sync || $2::jsonb", "updated_at = now()"];
-  const vals = [id, JSON.stringify(patch)];
+  // Keys set to undefined are removed (e.g. clearing an old error).
+  const remove = Object.keys(patch).filter((k) => patch[k] === undefined);
+  const sets = ["sync = (sync - $3::text[]) || $2::jsonb", "updated_at = now()"];
+  const vals = [id, JSON.stringify(patch), remove];
   for (const [k, v] of Object.entries(cols)) {
     if (!["hubspot_contact_id", "hubspot_deal_id", "jotform_step1_id", "jotform_step2_id"].includes(k)) continue;
     vals.push(v);
@@ -270,10 +272,30 @@ async function syncOnce(app, schema, log) {
   if (app.paid_at && !s.hsPaid && paymentSyncOn()) {
     try {
       const res = await applyAppFee(app, schema);
-      await setSync(app.id, { hsPaid: ok(res) }, { hubspot_deal_id: res.dealId, ...(res.contactId ? { hubspot_contact_id: res.contactId } : {}) });
+      await setSync(app.id, { hsPaid: ok(res), hsPaidError: undefined }, { hubspot_deal_id: res.dealId, ...(res.contactId ? { hubspot_contact_id: res.contactId } : {}) });
+      app.hubspot_deal_id = res.dealId;
       out.hsPaid = "ok";
     } catch (err) { log.error("[sync paid]", err.message); await setSync(app.id, { hsPaidError: fail(err) }); out.hsPaid = err.message; }
   }
+  // ── HubSpot: parents + Pacific Discovery program record (application in) ─
+  // Parents are created/updated (by email) and linked to the student and the
+  // deal; student, parents and deal are linked to the matching program record
+  // (custom object 2-58411705) with the Student / Parent labels the portals
+  // use to decide which tabs to show. Each part is idempotent; the program
+  // link retries on every later sync until a matching record exists.
+  if (app.step2_at && (hubspotSyncOn() || paymentSyncOn()) && (!s.hsFamily || !s.hsProgram)) {
+    try {
+      const r = await linkFamilyAndProgram(app, schema, { family: !s.hsFamily, program: !s.hsProgram });
+      const patch = {};
+      if (r.family) patch.hsFamily = ok(r.family);
+      if (r.program?.record) { patch.hsProgram = ok(r.program); patch.hsProgramError = undefined; }
+      else if (r.program) patch.hsProgramError = { ok: false, at: new Date().toISOString(), error: r.program.reason, candidates: r.program.candidates };
+      patch.hsFamilyError = undefined;
+      await setSync(app.id, patch);
+      out.hsFamily = "ok"; out.hsProgram = r.program?.record ? "ok" : r.program?.reason;
+    } catch (err) { log.error("[sync family]", err.message); await setSync(app.id, { hsFamilyError: fail(err) }); out.hsFamily = err.message; }
+  }
+
   return out;
 }
 
@@ -302,6 +324,62 @@ export async function placeInApplicationPipeline(app, schema) {
   };
   const r = await HS.updateDeal(dealId, update);
   return { dealId: String(dealId), contactId, pipeline: applicant.label, stage: stage?.label || null, movedFrom: p.pipeline && p.pipeline !== applicant.id ? p.pipeline : undefined, dropped: r.dropped };
+}
+
+/**
+ * Parents → student + deal, and student/parents/deal → program record.
+ * Labels: contact↔contact "Parent", deal→contact "Student" / "Parent",
+ * contact→program "Student" / "Parent" (each overridable by env, falls back
+ * to the closest-named label, then to an unlabelled association).
+ */
+export async function linkFamilyAndProgram(app, schema, { family = true, program = true } = {}) {
+  const { contactId } = await resolveHubspot(app, schema);
+  const dealId = app.hubspot_deal_id;
+  if (!contactId) throw new Error("Student contact is not in HubSpot yet");
+  if (!dealId) throw new Error("The deal is not in HubSpot yet — will retry");
+  const OBJ = R.PROGRAM_OBJECT_TYPE;
+  const env = (k, d) => process.env[k] || d;
+  const [ccParent, dealStudent, dealParent, progStudent, progParent] = await Promise.all([
+    HS.findLabel("contacts", "contacts", env("HUBSPOT_PARENT_LABEL", "Parent"), /parent|guardian/i),
+    HS.findLabel("deals", "contacts", env("HUBSPOT_DEAL_STUDENT_LABEL", "Student"), /student/i),
+    HS.findLabel("deals", "contacts", env("HUBSPOT_DEAL_PARENT_LABEL", "Parent"), /parent|guardian/i),
+    HS.findLabel("contacts", OBJ, env("HUBSPOT_PROGRAM_STUDENT_LABEL", "Student"), /student/i),
+    HS.findLabel("contacts", OBJ, env("HUBSPOT_PROGRAM_PARENT_LABEL", "Parent"), /parent|guardian/i),
+  ]);
+  const out = { family: null, program: null };
+
+  // Parents (always resolved — the program step needs their ids too).
+  const parents = [];
+  for (const p of R.parentContacts(app.answers || {}, app.email)) {
+    const c = await HS.upsertContact(p.props.email, { ...p.props, company_tag: env("HUBSPOT_COMPANY_TAG", "Pacific Discovery") });
+    parents.push({ id: c.id, email: p.props.email, which: p.which, created: c.created, dropped: c.dropped });
+  }
+
+  if (family) {
+    await HS.associate("deals", dealId, "contacts", contactId, dealStudent);
+    for (const p of parents) {
+      await HS.associate("contacts", p.id, "contacts", contactId, ccParent);
+      await HS.associate("deals", dealId, "contacts", p.id, dealParent);
+    }
+    out.family = {
+      parents: parents.map(({ id, email, which, created }) => ({ id, email, which, created })),
+      labels: { parent: ccParent?.label || null, dealStudent: dealStudent?.label || null, dealParent: dealParent?.label || null },
+    };
+  }
+
+  if (program) {
+    const facts = K.enrolmentFacts(schema, app.answers || {});
+    const { pdProgram } = await pdProgramFor(schema, app);
+    const records = await HS.programRecords(OBJ);
+    const m = R.matchProgramRecord(records, { program: facts.program, pdProgram, programType: facts.programType, season: facts.season, year: facts.year });
+    if (m.record) {
+      await HS.associate("contacts", contactId, OBJ, m.record.id, progStudent);
+      for (const p of parents) await HS.associate("contacts", p.id, OBJ, m.record.id, progParent);
+      await HS.associate("deals", dealId, OBJ, m.record.id, null);
+    }
+    out.program = { record: m.record, reason: m.reason, candidates: m.candidates, labels: { student: progStudent?.label || null, parent: progParent?.label || null } };
+  }
+  return out;
 }
 
 function escapeHtml(s) {
