@@ -17,6 +17,7 @@ import { db, publishedSchema } from "./_lib/db.mjs";
 import { json, readJson, errorResponse, siteUrl, flag } from "./_lib/http.mjs";
 import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
+import { sanitizeAttribution } from "../../public/attribution-kit.mjs";
 import { createAppFeeCheckout, getCheckoutSession } from "./_lib/stripe.mjs";
 
 export const config = { path: "/api/apply/*" };
@@ -149,8 +150,6 @@ export async function recordPayment(appId, session) {
 
 // ── step 1 ─────────────────────────────────────────────────────────────────
 
-const ATTR_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "referrer", "landing"];
-
 async function start(req, context) {
   const body = await readJson(req);
   if (body.hp) return json({ error: "Please try again." }, 400); // honeypot
@@ -167,8 +166,7 @@ async function start(req, context) {
     if ((rows[0]?.n || 0) >= 8) throw bad("Too many applications from this connection. Please try again later.", 429);
   }
 
-  const attribution = {};
-  for (const k of ATTR_KEYS) if (body.attribution?.[k]) attribution[k] = String(body.attribution[k]).slice(0, 500);
+  const attribution = sanitizeAttribution(body.attribution);
   const { app, token } = await A.createFromStep1({ schema, rev, clean: res.clean, attribution, ip, userAgent: req.headers.get("user-agent") });
   await A.triggerSync(app.id, { schema });
   return json({ token, status: statusBody(app, schema) });

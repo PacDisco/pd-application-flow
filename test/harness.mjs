@@ -15,7 +15,7 @@ export async function setupDb(schema) {
   const sql = async (strings, ...vals) => (await pool.query(toText(strings, vals), vals)).rows;
   sql.query = async (text, params = []) => (await pool.query(text, params)).rows;
   __setSql(sql);
-  await pool.query('TRUNCATE apply_files, applications, apply_form_versions, apply_forms CASCADE');
+  await pool.query('TRUNCATE apply_files, applications, apply_form_versions, apply_forms, quiz_responses CASCADE');
   await pool.query(`INSERT INTO apply_forms (id, draft, published, published_rev) VALUES ($1, $2, $2, 1)`, [FORM_ID, JSON.stringify(schema)]);
   return { pool, sql };
 }
@@ -63,6 +63,20 @@ export function fakeUpstreams({ pdOptions } = {}) {
     const body = init.body;
     calls.push({ host: url.host, method, path: url.pathname, body: typeof body === 'string' ? body : null });
 
+    if (url.host === 'api.hsforms.com') {
+      // Forms API: creates/updates the contact like HubSpot does (synchronously here).
+      const b = JSON.parse(body);
+      crm.formSubs = crm.formSubs || [];
+      crm.formSubs.push({ path: url.pathname, ...b, auth: !!init.headers?.Authorization });
+      if (crm.formReject && b.fields.length > 1) return J({ status: 'error', errors: [{ message: "Field 'phone' is not on the form" }] }, 400);
+      const props = Object.fromEntries(b.fields.map((f) => [f.name, f.value]));
+      const email = props.email;
+      let c = [...crm.contacts.values()].find((x) => x.properties.email === email);
+      if (!c) { const id = String(crm.seq++); c = { id, properties: { hs_analytics_source: b.context?.hutk ? 'PAID_SEARCH' : 'OFFLINE' } }; crm.contacts.set(id, c); }
+      Object.assign(c.properties, props);
+      return new Response(null, { status: 204 });
+    }
+
     if (url.host === 'api.hubapi.com') {
       const b = body ? JSON.parse(body) : {};
       const p = url.pathname;
@@ -76,7 +90,11 @@ export function fakeUpstreams({ pdOptions } = {}) {
         const id = String(crm.seq++); crm.contacts.set(id, { id, properties: b.properties }); return J({ id });
       }
       let m;
+      if ((m = /^\/crm\/v3\/objects\/contacts\/(\d+)$/.exec(p)) && method === 'GET') {
+        const c = crm.contacts.get(m[1]); return c ? J(c) : J({ message: 'not found' }, 404);
+      }
       if ((m = /^\/crm\/v3\/objects\/contacts\/(\d+)$/.exec(p)) && method === 'PATCH') {
+        if ('bogus_prop' in b.properties) return J({ message: 'Property values were not valid', errors: [{ message: 'Property "bogus_prop" does not exist', context: { propertyName: ['bogus_prop'] } }] }, 400);
         Object.assign(crm.contacts.get(m[1]).properties, b.properties); return J({ id: m[1] });
       }
       if (p === '/crm/v3/pipelines/deals') return J({ results: crm.pipelines });
@@ -100,11 +118,33 @@ export function fakeUpstreams({ pdOptions } = {}) {
       if (p === '/crm/v3/objects/notes') { crm.notes.push(b); return J({ id: 'n1' }); }
       if (p === '/crm/v4/associations/contacts/contacts/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 51, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 52, label: 'Child' }] });
       if (p === '/crm/v4/associations/deals/contacts/labels') return J({ results: [{ category: 'HUBSPOT_DEFINED', typeId: 3, label: null }, { category: 'USER_DEFINED', typeId: 61, label: 'Student' }, { category: 'USER_DEFINED', typeId: 62, label: 'Parent' }] });
-      if (p === '/crm/v4/associations/contacts/2-58411705/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 71, label: 'Student' }, { category: 'USER_DEFINED', typeId: 72, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 28, label: 'Instructor' }] });
+      // Paired labels like the real portal: the contact side reads "Program",
+      // the program side reads Instructor / Parent / Student. A paired type id
+      // is only accepted in its own direction.
+      if (p === '/crm/v4/associations/contacts/2-58411705/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 27, label: 'Program' }, { category: 'USER_DEFINED', typeId: 29, label: 'Program' }, { category: 'USER_DEFINED', typeId: 31, label: 'Program' }] });
+      if (p === '/crm/v4/associations/2-58411705/contacts/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 28, label: null }, { category: 'USER_DEFINED', typeId: 30, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 32, label: 'Student' }] });
+      if ((m = /^\/crm\/v4\/objects\/contacts\/([^/]+)\/associations\/2-58411705$/.exec(p))) {
+        const PAIR = { 30: 29, 32: 31, 28: 27 };
+        const rows = new Map();
+        for (const a of crm.assocLog) {
+          let cid, rid, t = a.typeId;
+          if (a.from === 'contacts' && a.to === '2-58411705') { cid = a.fromId; rid = a.toId; }
+          else if (a.from === '2-58411705' && a.to === 'contacts') { cid = a.toId; rid = a.fromId; }
+          else continue;
+          if (cid !== m[1]) continue;
+          const types = rows.get(rid) || [];
+          if (t == null) types.push({ category: 'HUBSPOT_DEFINED', typeId: 1, label: null });
+          else { types.push({ category: 'USER_DEFINED', typeId: PAIR[t] ?? t, label: 'Program' }); types.push({ category: 'USER_DEFINED', typeId: t, label: null }); }
+          rows.set(rid, types);
+        }
+        return J({ results: [...rows].map(([rid, types]) => ({ toObjectId: rid, associationTypes: types })) });
+      }
       if (p === '/crm/v3/objects/2-58411705') return J({ results: crm.programs });
       if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/(default\/)?([^/]+)\/([^/]+)$/.exec(p)) && method === 'PUT') {
         const [, from, fromId, dflt, to, toId] = m;
         const types = dflt ? [null] : b.map((t) => t.associationTypeId);
+        // paired program labels only work program → contact
+        if (from === 'contacts' && to === '2-58411705' && types.some((x) => [28, 30, 32].includes(x))) return J({ message: 'Invalid association type for this direction' }, 400);
         for (const typeId of types) crm.assocLog.push({ from, fromId, to, toId, typeId });
         return J({ ok: true });
       }
@@ -153,6 +193,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
 /** Minimal local server: static public/ + the function routes. */
 export async function startServer(port = 8899) {
   const apply = (await import('../netlify/functions/apply.mjs')).default;
+  const quiz = (await import('../netlify/functions/quiz.mjs')).default;
   const service = (await import('../netlify/functions/service.mjs')).default;
   const file = (await import('../netlify/functions/file.mjs')).default;
   const webhook = (await import('../netlify/functions/stripe-webhook.mjs')).default;
@@ -166,6 +207,7 @@ export async function startServer(port = 8899) {
     const r = new Request(url, { method: req.method, headers: req.headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : body, duplex: 'half' });
     let out;
     if (url.pathname.startsWith('/api/apply/')) out = await apply(r, { ip: '127.0.0.1' });
+    else if (url.pathname.startsWith('/api/quiz/')) out = await quiz(r, { ip: '127.0.0.1' });
     else if (url.pathname.startsWith('/api/service/')) out = await service(r);
     else if (url.pathname.startsWith('/api/file/')) out = await file(r, { params: { id: url.pathname.split('/').pop() } });
     else if (url.pathname === '/api/stripe-webhook') out = await webhook(r);
@@ -174,7 +216,7 @@ export async function startServer(port = 8899) {
       res.end(Buffer.from(await out.arrayBuffer()));
       return;
     }
-    let p = join(root, url.pathname === '/' ? 'index.html' : url.pathname);
+    let p = join(root, url.pathname === '/' ? 'index.html' : url.pathname === '/quiz' ? 'quiz.html' : url.pathname);
     if (!existsSync(p)) { res.writeHead(404); res.end('not found'); return; }
     res.writeHead(200, { 'Content-Type': types[extname(p)] || 'application/octet-stream' });
     res.end(readFileSync(p));

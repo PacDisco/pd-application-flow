@@ -83,7 +83,10 @@ new ResizeObserver(notifyParent).observe(document.body);
 
 function texts() { return S.schema?.settings?.texts || {}; }
 
-// ── attribution (captured once, on the landing visit) ───────────────────────
+// ── attribution ─────────────────────────────────────────────────────────────
+// Flat utm/landing capture for the hidden fields (once per tab), plus — sent
+// with step 1 — the first/latest-touch cookie written by /attribution.js and
+// HubSpot's visitor cookie, so the HubSpot contact gets its real source.
 function captureAttribution(url) {
   const prev = JSON.parse(store.get(ATTR_KEY, sessionStorage) || 'null');
   if (prev) return prev;
@@ -97,6 +100,26 @@ function captureAttribution(url) {
   if (document.referrer) a.referrer = document.referrer;
   store.set(ATTR_KEY, JSON.stringify(a), sessionStorage);
   return a;
+}
+
+function readCookie(name) {
+  try { const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`)); return m ? decodeURIComponent(m[1]) : ''; } catch { return ''; }
+}
+
+function attributionPayload(attr) {
+  let c = {};
+  try { c = window.PDAttribution?.get?.() || {}; } catch { /* blocked */ }
+  const page = /^https?:/.test(attr.landing || '') && window.parent !== window ? attr.landing : `${location.origin}${location.pathname}`;
+  return { ...attr, first: c.f || null, last: c.l || null, hutk: readCookie('hubspotutk'), pageUri: page, pageName: document.title };
+}
+
+// Name / email / phone carried over from the quiz (same browser, last 2 days).
+function quizPrefill() {
+  try {
+    const p = JSON.parse(store.get('pd-quiz-prefill') || 'null');
+    if (!p || Date.now() - (p.at || 0) > 2 * 864e5) return null;
+    return p.values || null;
+  } catch { return null; }
 }
 
 function hiddenValues(attr) {
@@ -207,7 +230,7 @@ function showStep1(attr) {
       <div class="hp" aria-hidden="true"><label>Leave this empty<input name="website" tabindex="-1" autocomplete="off"></label></div>
       <div class="actions"><span class="small">Takes about 2 minutes.</span><button class="btn btn--primary" type="submit">${esc(st?.submitLabel || 'Next')} →</button></div>
     </form>`;
-  S.form = renderStep($('#fields'), S.schema, 'step1', { values: S.prefill.step1 || {}, onChange: notifyParent });
+  S.form = renderStep($('#fields'), S.schema, 'step1', { values: S.prefill.step1 || quizPrefill() || {}, onChange: notifyParent });
   $('#f').addEventListener('submit', async (e) => {
     e.preventDefault();
     say('', '');
@@ -216,7 +239,7 @@ function showStep1(attr) {
     const btn = e.submitter || $('#f button[type=submit]');
     busy(btn, true, 'Saving…');
     try {
-      const out = await api('start', { method: 'POST', body: { values: { ...S.form.values(), ...hiddenValues(attr) }, hp: $('#f [name=website]').value, attribution: attr } });
+      const out = await api('start', { method: 'POST', body: { values: { ...S.form.values(), ...hiddenValues(attr) }, hp: $('#f [name=website]').value, attribution: attributionPayload(attr) } });
       S.token = out.token;
       if (!S.preview) store.set(TOKEN_KEY, out.token);
       S.status = out.status;

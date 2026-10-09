@@ -54,7 +54,7 @@ The stage is the pipeline's "Application Fee Received" (or "…Paid") stage. `pd
    | `APPLY_DATABASE_URL` | the dashboard site's `NETLIFY_DATABASE_URL` (same Neon DB) |
    | `APPLY_SITE_URL` | `https://apply.pacificdiscovery.org` |
    | `APPLY_SERVICE_KEY` | a long random secret (`openssl rand -hex 32`), shared with the dashboard and both portals |
-   | `HUBSPOT_TOKEN` | private-app token. Scopes: contacts read/write, deals read/write, deal schemas read |
+   | `HUBSPOT_TOKEN` | private-app token. Scopes: contacts read/write, deals read/write, deal schemas read, **forms** (for the source-tracking form submissions; without it the public submit endpoint is used) |
    | `JOTFORM_API_KEY` | same key the portals use |
    | `STRIPE_SECRET_KEY` | same Stripe account as the student portal |
    | `STRIPE_WEBHOOK_SECRET` | from step 5 |
@@ -67,6 +67,8 @@ The stage is the pipeline's "Application Fee Received" (or "…Paid") stage. `pd
    | `SMTP_FROM_NAME` | optional, default `Pacific Discovery Applications` |
    | `HUBSPOT_PROGRAM_OBJECT` | optional, default `2-58411705` (Pacific Discovery program object) |
    | `HUBSPOT_PARENT_LABEL`, `HUBSPOT_DEAL_STUDENT_LABEL`, `HUBSPOT_DEAL_PARENT_LABEL`, `HUBSPOT_PROGRAM_STUDENT_LABEL`, `HUBSPOT_PROGRAM_PARENT_LABEL` | optional association-label names; defaults `Parent` / `Student` / `Parent` / `Student` / `Parent` |
+   | `HUBSPOT_PORTAL_ID` | optional, default `3855728` — used for HubSpot form submissions |
+   | `HUBSPOT_STEP1_FORM_GUID`, `HUBSPOT_QUIZ_FORM_GUID` | optional fallbacks; normally the HubSpot form IDs are set in the dashboard (Apply Form → Fee, interview & text; Quiz → Settings & HubSpot) |
    | `HUBSPOT_APPLICATION_PIPELINE` | optional; the application pipeline's name or ID, default `PD Applications` |
 
 4. **Domain:** add `apply.pacificdiscovery.org` to the site.
@@ -105,7 +107,54 @@ Archived or disabled Jotform forms don't count toward the form limit. But while 
 
 Jotform notification and autoresponder emails can fire on mirrored submissions. Check those after launch, and recreate any you rely on in HubSpot before switching the mirror off.
 
+## Gap-year quiz (`/quiz`) and real lead sources
+
+`apply.pacificdiscovery.org/quiz` replaces Jotform form `252958612162864`: the same
+15 questions and the same scoring for the five results (Adventurer, Cultural
+Connector, Ocean Guardian, Changemaker, Seeker — ties go to the one listed first).
+It's edited in the dashboard (**Apply Form → Quiz editor**); until the first
+publish there, the copy bundled here (`scripts/quiz-seed.json`) is served.
+After the result, “Start your application” opens the application with name,
+email and phone already filled in.
+
+**Why HubSpot said "Offline Sources".** Contacts created by Zapier / Make / the
+CRM API have no visitor cookie, so HubSpot can't see the visit. Now, for both the
+quiz and application step 1, the sync:
+
+1. submits to a **HubSpot form** with the visitor's `hubspotutk` cookie, page URL
+   and IP — this creates the contact, so HubSpot's Original Source is the real
+   channel (the HubSpot tracking code is on every page here to set that cookie);
+2. waits for HubSpot to process it (up to 30 s in the background function);
+3. writes the rest via the CRM API: the `pd_first_*` (never overwritten) and
+   `pd_last_*` source properties (channel, source, medium, campaign, ad click id,
+   landing page, referring site), `utm_*`/`gclid`/`fbclid` if those properties
+   exist, plus for the quiz `pd_quiz_archetype`, `pd_quiz_answers`, `pd_quiz_date`
+   and lead status `NEW` (only if empty).
+
+This runs *before* the Jotform mirror, so an old Zap firing off the mirrored
+submission can't create the contact first. Turn those Zaps off anyway.
+
+`/attribution.js` keeps the first and latest campaign visit in a
+`.pacificdiscovery.org` cookie (`pd_attr`, no personal data). Add it to every page
+of the main website so a visitor who arrives from an ad and takes the quiz days
+later is still credited to the ad:
+
+```html
+<script src="https://apply.pacificdiscovery.org/attribution.js" async></script>
+```
+
+HubSpot's "collected forms" script is deliberately blocked by the CSP here so it
+doesn't submit the quiz a second time. Turn off HubSpot's notification emails on
+the two forms if you don't want one per submission.
+
+Setup: run `MIGRATION-quiz.sql` (dashboard repo) in Neon; in the dashboard click
+**Lead Sources → Set up HubSpot properties**, then **Create in HubSpot** for the
+form in both the Quiz and Apply Form settings, and publish both. Point the old
+quiz link (and any Cloudflare redirect) at `https://apply.pacificdiscovery.org/quiz`.
+
 ## Testing the flow by hand (preview mode)
+
+The quiz has the same switch: `/quiz?preview=1` scores locally and sends nothing.
 
 Open `https://apply.pacificdiscovery.org/?preview=1` (or **Test the flow ↗** in the dashboard editor). A yellow bar lets you jump to any screen, and **Fill in test answers** pre-fills both forms. You can also go straight to a screen with `&step=step2|interview|payment|done`.
 

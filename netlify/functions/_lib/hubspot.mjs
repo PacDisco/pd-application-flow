@@ -102,6 +102,31 @@ export async function upsertContact(email, props) {
   }
 }
 
+/** Read some properties of a contact. */
+export async function getContact(id, properties = []) {
+  const q = properties.length ? `?properties=${properties.map(encodeURIComponent).join(",")}` : "";
+  return hs(`/crm/v3/objects/contacts/${encodeURIComponent(id)}${q}`);
+}
+
+/** PATCH a contact, dropping properties the portal doesn't have. Returns { dropped }. */
+export async function patchContact(id, props) {
+  const body = clean(props);
+  if (!Object.keys(body).length) return { dropped: [] };
+  const { dropped } = await withPropRetry(body, (p) => hs(`/crm/v3/objects/contacts/${id}`, { method: "PATCH", body: { properties: p } }));
+  return { dropped };
+}
+
+/** Poll until a contact with this email exists (HubSpot processes form submissions asynchronously). */
+export async function waitForContact(email, { timeoutMs = 30000, everyMs = 2500, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const c = await findContactByEmail(email);
+    if (c) return c;
+    if (Date.now() + everyMs > until) return null;
+    await sleep(everyMs);
+  }
+}
+
 // ── pipelines / properties ─────────────────────────────────────────────────
 
 let _pipes = null;
@@ -225,4 +250,56 @@ export async function programRecords(objectType) {
   }
   _programs = { at: Date.now(), list };
   return list;
+}
+
+/**
+ * Associate a contact with a program record using a PAIRED label (the program
+ * object's labels come in pairs: the contact side reads "Program", the
+ * program side reads "Student" / "Parent" / "Instructor").
+ *
+ * HubSpot only accepts a paired type id in its own direction, and which
+ * direction holds "Student" depends on how the pair was created — so this
+ * tries contact→program first, then program→contact, with the type id that
+ * direction's label list gives for that name. Afterwards it reads the
+ * association back and confirms the label is really there.
+ *
+ * Returns { label, typeId, direction, verified }.
+ */
+export async function associateWithRole(contactId, objectType, recordId, roleLabel, fallbackRe) {
+  // Plain association first, so the records are linked even if labelling fails.
+  await hs(`/crm/v4/objects/contacts/${contactId}/associations/default/${objectType}/${recordId}`, { method: "PUT" });
+  const want = String(roleLabel).trim().toLowerCase();
+  const pick = (list) => list.find((l) => (l.label || "").trim().toLowerCase() === want)
+    || (fallbackRe ? list.find((l) => fallbackRe.test(l.label || "") && !/dnu|do not use/i.test(l.label || "")) : null);
+  const fwd = pick(await associationLabels("contacts", objectType).catch(() => []));
+  const rev = pick(await associationLabels(objectType, "contacts").catch(() => []));
+  const attempts = [];
+  if (fwd) attempts.push(["contacts→program", () => hs(`/crm/v4/objects/contacts/${contactId}/associations/${objectType}/${recordId}`, { method: "PUT", body: [{ associationCategory: fwd.category || "USER_DEFINED", associationTypeId: Number(fwd.typeId) }] }), fwd]);
+  if (rev) attempts.push(["program→contacts", () => hs(`/crm/v4/objects/${objectType}/${recordId}/associations/contacts/${contactId}`, { method: "PUT", body: [{ associationCategory: rev.category || "USER_DEFINED", associationTypeId: Number(rev.typeId) }] }), rev]);
+  if (!attempts.length) throw new Error(`No "${roleLabel}" association label exists between contacts and the program object`);
+  const errors = [];
+  for (const [direction, run, type] of attempts) {
+    try {
+      await run();
+      const verified = await hasRole(contactId, objectType, recordId, roleLabel);
+      if (verified !== false) return { label: type.label, typeId: type.typeId, direction, verified };
+      errors.push(`${direction}: accepted but the "${roleLabel}" label isn't on the association`);
+    } catch (err) { errors.push(`${direction}: ${err.message}`); }
+  }
+  throw new Error(`Couldn't add the "${roleLabel}" label — ${errors.join(" | ")}`);
+}
+
+/** true / false, or null when it can't be read back. */
+export async function hasRole(contactId, objectType, recordId, roleLabel) {
+  try {
+    const data = await hs(`/crm/v4/objects/contacts/${contactId}/associations/${objectType}?limit=500`);
+    const row = (data?.results || []).find((r) => String(r.toObjectId) === String(recordId));
+    if (!row) return false;
+    const typeIds = new Set((row.associationTypes || []).map((t) => Number(t.typeId)));
+    const labelsHere = (row.associationTypes || []).map((t) => (t.label || "").toLowerCase());
+    if (labelsHere.includes(String(roleLabel).toLowerCase())) return true;
+    // Labels can come back null on paired types — compare type ids from both directions instead.
+    const defs = [...(await associationLabels("contacts", objectType).catch(() => [])), ...(await associationLabels(objectType, "contacts").catch(() => []))];
+    return defs.some((d) => typeIds.has(Number(d.typeId)) && (d.label || "").toLowerCase() === String(roleLabel).toLowerCase());
+  } catch { return null; }
 }

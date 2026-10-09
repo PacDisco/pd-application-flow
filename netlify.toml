@@ -17,9 +17,12 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    # The flow can be embedded on www.pacificdiscovery.org. HubSpot's meeting
-    # scheduler and Stripe Checkout are the only third parties it talks to.
-    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://meetings.hubspot.com https://*.hubspot.com; connect-src 'self'; frame-ancestors 'self' https://www.pacificdiscovery.org https://pacificdiscovery.org https://dashboard.pacificdiscovery.org; form-action 'self' https://checkout.stripe.com"
+    # The flow can be embedded on www.pacificdiscovery.org. Third parties:
+    # HubSpot (tracking code, meeting scheduler) and Stripe Checkout.
+    # js.hscollectedforms.net is deliberately NOT allowed: HubSpot's
+    # "non-HubSpot forms" collector would double-submit the quiz/application —
+    # the server already submits to the HubSpot form with the visitor cookie.
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://js.hs-scripts.com https://js.hs-analytics.net https://js.hs-banner.com https://js.hsadspixel.net https://js.hubspot.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://meetings.hubspot.com https://*.hubspot.com; connect-src 'self' https://*.hubspot.com https://*.hs-banner.com https://*.hs-analytics.net https://*.hsadspixel.net; frame-ancestors 'self' https://www.pacificdiscovery.org https://pacificdiscovery.org https://dashboard.pacificdiscovery.org; form-action 'self' https://checkout.stripe.com"
 
 [[headers]]
   for = "/form-kit.mjs"
@@ -31,3 +34,25 @@
   for = "/app.js"
   [headers.values]
     Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/attribution.js"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+    Access-Control-Allow-Origin = "*"
+
+[[headers]]
+  for = "/*.mjs"
+  [headers.values]
+    Content-Type = "text/javascript; charset=utf-8"
+    Cache-Control = "no-cache"
+
+[[redirects]]
+  from = "/quiz"
+  to = "/quiz.html"
+  status = 200
+
+[[redirects]]
+  from = "/quiz/"
+  to = "/quiz.html"
+  status = 200

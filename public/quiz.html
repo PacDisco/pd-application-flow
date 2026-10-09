@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Apply — Pacific Discovery</title>
-<meta name="description" content="Apply to a Pacific Discovery gap semester, mini semester or summer program.">
+<title>Gap Year Quiz — Pacific Discovery</title>
+<meta name="description" content="Which gap year traveler are you? Take the Pacific Discovery quiz and find the program that fits you.">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -89,6 +89,33 @@ h1,h2,h3{color:var(--ink);margin:0}
 .pvbar__fill{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
 .foot{max-width:880px;margin:0 auto;padding:0 16px 40px;font-size:13px;color:var(--muted);text-align:center}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;scroll-behavior:auto!important}}
+.qbar{height:6px;border-radius:999px;background:#dfe5e7;margin:0 0 18px;overflow:hidden}
+.qbar span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--topaz),var(--teal));transition:width .25s ease}
+.qcount{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 6px}
+.qtitle{font-size:28px;line-height:1.2;margin:0 0 6px}
+@media (max-width:600px){.qtitle{font-size:24px}}
+.qhelp{color:var(--muted);margin:0 0 16px;font-size:15px}
+.opts{display:grid;gap:10px;margin:14px 0 6px}
+.opt{display:flex;gap:12px;align-items:center;text-align:left;width:100%;min-height:56px;padding:12px 16px;border:1.5px solid var(--line);border-radius:14px;background:#fff;font:inherit;color:var(--ink);cursor:pointer;transition:border-color .15s,background .15s}
+.opt:hover{border-color:var(--topaz);background:#fbfeff}
+.opt:focus-visible{outline:3px solid rgba(85,187,210,.6);outline-offset:2px}
+.opt .mk{flex:0 0 22px;height:22px;border-radius:50%;border:2px solid #b9c4c8;display:inline-flex;align-items:center;justify-content:center}
+.opt[data-multi] .mk{border-radius:6px}
+.opt[aria-checked=true]{border-color:var(--teal);background:var(--soft)}
+.opt[aria-checked=true] .mk{border-color:var(--teal);background:var(--teal)}
+.opt[aria-checked=true] .mk::after{content:"";width:8px;height:8px;border-radius:50%;background:#fff}
+.opt[data-multi][aria-checked=true] .mk::after{width:10px;height:6px;border-radius:0;background:none;border:2px solid #fff;border-top:0;border-right:0;transform:rotate(-45deg) translate(1px,-1px)}
+.opt[aria-disabled=true]{opacity:.5;cursor:not-allowed}
+.qerr{color:var(--bad);font-size:14px;min-height:20px;margin:4px 0 0}
+.result-badge{display:inline-flex;padding:5px 14px;border-radius:999px;background:var(--ok-bg);color:var(--ok);font-weight:600;font-size:13px;margin:0 0 10px}
+.result h1{font-size:38px}
+.result .body{font-size:17px}
+.result .body p{margin:0 0 14px}
+.scores{display:grid;gap:6px;margin:18px 0 0;font-size:13px}
+.scores div{display:grid;grid-template-columns:150px 1fr 24px;gap:8px;align-items:center}
+.scores i{display:block;height:6px;border-radius:999px;background:var(--topaz)}
+.intro-list{margin:0 0 22px;padding:0;list-style:none;display:flex;gap:8px;flex-wrap:wrap}
+.intro-list li{background:var(--soft);color:var(--teal-dk);border-radius:999px;padding:5px 12px;font-size:13px;font-weight:600}
 </style>
 </head>
 <body>
@@ -98,24 +125,16 @@ h1,h2,h3{color:var(--ink);margin:0}
     <a href="mailto:info@pacificdiscovery.org"><span class="long">Questions? info@pacificdiscovery.org</span><span class="short">Contact us</span></a>
   </div>
 </header>
-
 <main class="wrap" id="main" tabindex="-1">
-  <ol class="steps" id="steps" aria-label="Application progress">
-    <li data-step="step1"><span class="n">Step 1</span><span class="t">About you</span></li>
-    <li data-step="step2"><span class="n">Step 2</span><span class="t">Application</span></li>
-    <li data-step="interview"><span class="n">Step 3</span><span class="t">Interview</span></li>
-    <li data-step="payment"><span class="n">Step 4</span><span class="t">Application fee</span></li>
-  </ol>
   <div id="banner" role="status" aria-live="polite"></div>
   <section class="card" id="view" aria-live="polite">
-    <div class="loading">Loading your application…</div>
+    <div class="loading">Loading the quiz…</div>
   </section>
 </main>
-<p class="foot">Pacific Discovery · Your information is sent securely and only used to process your application.</p>
-
+<p class="foot">Pacific Discovery · We use your answers to recommend programs and to follow up about your gap year.</p>
 <script src="/attribution.js"></script>
-<!-- HubSpot tracking code: sets the hubspotutk visitor cookie that ties form submissions to page views (Original Source). -->
+<!-- HubSpot tracking code: sets the hubspotutk visitor cookie that ties the quiz submission to page views (Original Source). -->
 <script id="hs-script-loader" async defer src="https://js.hs-scripts.com/3855728.js"></script>
-<script type="module" src="/app.js"></script>
+<script type="module" src="/quiz.js"></script>
 </body>
 </html>

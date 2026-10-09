@@ -173,6 +173,56 @@ try {
     await page.close();
     console.log('  ✓ preview mode');
   }
+  {
+    // Quiz: landing with UTMs → every question → details → result → application prefilled.
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await ctx.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('console', (m) => { if (m.type() === 'error' && !/fonts|hubspot|hs-scripts/i.test(m.text())) errors.push(m.text()); });
+    await page.route('https://fonts.googleapis.com/**', (r) => r.fulfill({ body: '', contentType: 'text/css' }));
+    await page.route('https://js.hs-scripts.com/**', (r) => r.fulfill({ body: 'document.cookie="hubspotutk=0123456789abcdef0123456789abcdef; path=/"', contentType: 'text/javascript' }));
+    await page.goto('http://localhost:8899/quiz?utm_source=facebook&utm_medium=paid_social&utm_campaign=quiz-fall');
+    await page.waitForSelector('#go');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/quiz-0-intro.png`, fullPage: true });
+    await page.click('#go');
+    for (let i = 0; i < 15; i += 1) {
+      await page.waitForSelector('.opt');
+      const multi = await page.locator('.opt[data-multi]').count();
+      if (i === 0 && SHOTS) await page.screenshot({ path: `${SHOTS}/quiz-1-question.png`, fullPage: true });
+      if (multi) {
+        await page.locator('.opt').nth(0).click(); await page.locator('.opt').nth(4).click();
+        await page.locator('.opt').nth(1).click({ force: true });
+        assert.match(await page.textContent('#qerr'), /up to 2/);
+        if (SHOTS) await page.screenshot({ path: `${SHOTS}/quiz-2-regions.png`, fullPage: true });
+        await page.click('#next');
+      } else {
+        const q = await page.textContent('.qcount');
+        await page.locator('.opt').nth(i === 0 ? 2 : 0).click();
+        await page.waitForFunction((prev) => document.querySelector('.qcount')?.textContent !== prev || !!document.querySelector('#fk_email'), q);
+      }
+    }
+    await page.waitForSelector('#fk_email');
+    await page.fill('#fk_name', 'Quinn'); await page.fill('#fk_name_last', 'Diaz');
+    await page.fill('#fk_email', 'quinn@example.com'); await page.fill('#fk_mobile', '303 555 0177');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/quiz-3-details.png`, fullPage: true });
+    await page.click('button[type=submit]');
+    await page.waitForSelector('.result h1');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/quiz-4-result.png`, fullPage: true });
+    const [row] = (await pool.query(`SELECT * FROM quiz_responses WHERE email = 'quinn@example.com'`)).rows;
+    assert.ok(row, 'quiz saved');
+    assert.equal(row.attribution.first.utm_campaign, 'quiz-fall');
+    assert.equal(row.attribution.hutk, '0123456789abcdef0123456789abcdef');
+    assert.equal(row.attribution.pageUri, 'http://localhost:8899/quiz');
+    assert.match(await page.textContent('.result h1'), /Cultural Connector|Adventurer|Seeker|Ocean|Changemaker/);
+    await page.click('#cta');
+    await page.waitForSelector('#fk_email');
+    assert.equal(await page.inputValue('#fk_email'), 'quinn@example.com', 'application prefilled from the quiz');
+    assert.equal(await page.inputValue('#fk_name'), 'Quinn');
+    assert.deepEqual(errors, []);
+    await ctx.close();
+    console.log('  ✓ quiz → result → application prefilled');
+  }
 } finally {
   await browser.close(); server.close(); up.restore(); await pool.end();
 }

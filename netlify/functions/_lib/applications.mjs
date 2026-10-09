@@ -15,6 +15,7 @@ import { db } from "./db.mjs";
 import { hashToken, newToken, fileUrl, flag } from "./http.mjs";
 import * as K from "../../../public/form-kit.mjs";
 import * as HS from "./hubspot.mjs";
+import * as HSF from "./hsforms.mjs";
 import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
 import { alertOn, sendStep1Alert, sendInterviewNeededAlert } from "./notify.mjs";
@@ -25,7 +26,7 @@ export const paymentSyncOn = () => flag("HUBSPOT_PAYMENT_SYNC", true);
 
 const COLS = `id, email, first_name, last_name, program, term, season, travel_year, program_type, deal_amount, status,
   answers, form_rev, jf_step1, jf_step2, step1_at, step2_at, interview_at, interview, paid_at, payment,
-  hubspot_contact_id, hubspot_deal_id, jotform_step1_id, jotform_step2_id, sync, created_at, updated_at`;
+  hubspot_contact_id, hubspot_deal_id, jotform_step1_id, jotform_step2_id, sync, attribution, ip, created_at, updated_at`;
 
 export async function byToken(token) {
   if (!token || typeof token !== "string" || token.length < 20) return null;
@@ -154,7 +155,7 @@ export function hubspotProps(schema, answers, target) {
 }
 
 /** Run every outstanding sync target for one application. */
-export async function syncApplication(id, { schema, log = console } = {}) {
+export async function syncApplication(id, { schema, log = console, inline = false } = {}) {
   if (!(await lock(id))) return { skipped: "locked" };
   let again = false;
   const results = {};
@@ -162,7 +163,7 @@ export async function syncApplication(id, { schema, log = console } = {}) {
     do {
       const app = await byId(id);
       if (!app) return { error: "not found" };
-      Object.assign(results, await syncOnce(app, schema, log));
+      Object.assign(results, await syncOnce(app, schema, log, { inline }));
       again = await unlock(id);
       if (again && !(await lock(id))) break;
     } while (again);
@@ -173,11 +174,29 @@ export async function syncApplication(id, { schema, log = console } = {}) {
   return results;
 }
 
-async function syncOnce(app, schema, log) {
+async function syncOnce(app, schema, log, { inline = false } = {}) {
   const s = app.sync || {};
   const out = {};
   const answers = app.answers || {};
   const jfForms = schema?.settings?.jotform || {};
+  const hsReady = !!(process.env.HUBSPOT_TOKEN || process.env.HUBSPOT_API_KEY || process.env.HUBSPOT_PRIVATE_APP_TOKEN);
+
+  // ── HubSpot form submission + source properties (FIRST) ──────────────────
+  // Runs before the Jotform mirror (which can fire the old Zap) and before the
+  // CRM upsert, so the contact is created by the HubSpot form with the
+  // visitor's cookie and HubSpot's Original Source is the real channel.
+  if (hsReady && app.step1_at && !s.hsSource) {
+    try {
+      const names = hubspotProps(schema, answers, "contact");
+      const r = await HSF.submitAndAttribute({
+        formGuid: String(schema?.settings?.hubspotFormGuid || process.env.HUBSPOT_STEP1_FORM_GUID || "").trim(),
+        fields: { email: app.email, firstname: names.firstname || app.first_name || "", lastname: names.lastname || app.last_name || "" },
+        attr: app.attribution || {}, ip: app.ip, conversion: "Application (step 1)", waitMs: inline ? 6000 : 30000,
+      });
+      await setSync(app.id, { hsSource: ok({ form: r.formOk, formError: r.formError, waited: r.waited, note: r.note, dropped: r.dropped }) });
+      out.hsSource = r.formError ? `ok (form: ${r.formError})` : "ok";
+    } catch (err) { log.error("[sync hsSource]", err.message); await setSync(app.id, { hsSource: fail(err) }); out.hsSource = err.message; }
+  }
 
   // ── Jotform mirror ───────────────────────────────────────────────────────
   if (mirrorOn() && app.step1_at && !app.jotform_step1_id && jfForms.step1) {
@@ -194,8 +213,6 @@ async function syncOnce(app, schema, log) {
       app.jotform_step2_id = sid; out.jf2 = "ok";
     } catch (err) { log.error("[sync jf2]", err.message); await setSync(app.id, { jf2: fail(err) }); out.jf2 = err.message; }
   }
-
-  const hsReady = !!(process.env.HUBSPOT_TOKEN || process.env.HUBSPOT_API_KEY || process.env.HUBSPOT_PRIVATE_APP_TOKEN);
 
   // ── HubSpot: contact (always, from step 1) + applicant deal ──────────────
   // The contact is created/updated as soon as step 1 is in, in both modes —
@@ -357,12 +374,10 @@ export async function linkFamilyAndProgram(app, schema, { family = true, program
   if (!dealId) throw new Error("The deal is not in HubSpot yet — will retry");
   const OBJ = R.PROGRAM_OBJECT_TYPE;
   const env = (k, d) => process.env[k] || d;
-  const [ccParent, dealStudent, dealParent, progStudent, progParent] = await Promise.all([
+  const [ccParent, dealStudent, dealParent] = await Promise.all([
     HS.findLabel("contacts", "contacts", env("HUBSPOT_PARENT_LABEL", "Parent"), /parent|guardian/i),
     HS.findLabel("deals", "contacts", env("HUBSPOT_DEAL_STUDENT_LABEL", "Student"), /student/i),
     HS.findLabel("deals", "contacts", env("HUBSPOT_DEAL_PARENT_LABEL", "Parent"), /parent|guardian/i),
-    HS.findLabel("contacts", OBJ, env("HUBSPOT_PROGRAM_STUDENT_LABEL", "Student"), /student/i),
-    HS.findLabel("contacts", OBJ, env("HUBSPOT_PROGRAM_PARENT_LABEL", "Parent"), /parent|guardian/i),
   ]);
   const out = { family: null, program: null };
 
@@ -390,12 +405,20 @@ export async function linkFamilyAndProgram(app, schema, { family = true, program
     const { pdProgram } = await pdProgramFor(schema, app);
     const records = await HS.programRecords(OBJ);
     const m = R.matchProgramRecord(records, { program: facts.program, pdProgram, programType: facts.programType, season: facts.season, year: facts.year });
+    const links = [];
+    let linkError = null;
     if (m.record) {
-      await HS.associate("contacts", contactId, OBJ, m.record.id, progStudent);
-      for (const p of parents) await HS.associate("contacts", p.id, OBJ, m.record.id, progParent);
-      await HS.associate("deals", dealId, OBJ, m.record.id, null);
+      const studentLabel = env("HUBSPOT_PROGRAM_STUDENT_LABEL", "Student");
+      const parentLabel = env("HUBSPOT_PROGRAM_PARENT_LABEL", "Parent");
+      try {
+        links.push({ who: "student", contactId, ...(await HS.associateWithRole(contactId, OBJ, m.record.id, studentLabel, /student/i)) });
+        for (const p of parents) links.push({ who: p.which, contactId: p.id, ...(await HS.associateWithRole(p.id, OBJ, m.record.id, parentLabel, /parent|guardian/i)) });
+        await HS.associate("deals", dealId, OBJ, m.record.id, null);
+      } catch (err) { linkError = err.message; }
     }
-    out.program = { record: m.record, reason: m.reason, candidates: m.candidates, labels: { student: progStudent?.label || null, parent: progParent?.label || null } };
+    out.program = linkError
+      ? { record: null, reason: `Program record ${m.record.name}: ${linkError}`, candidates: m.candidates, links }
+      : { record: m.record, reason: m.reason, candidates: m.candidates, links };
   }
   return out;
 }
@@ -511,6 +534,6 @@ export async function triggerSync(appId, { schema } = {}) {
       if (res.status === 202 || res.ok) return { mode: "background" };
     } catch (err) { console.warn("[triggerSync] background call failed:", err.message); }
   }
-  try { return { mode: "inline", result: await syncApplication(appId, { schema }) }; }
+  try { return { mode: "inline", result: await syncApplication(appId, { schema, inline: true }) }; }
   catch (err) { console.error("[triggerSync] inline sync failed:", err.message); return { mode: "inline", error: err.message }; }
 }

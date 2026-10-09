@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "node test/form-kit.test.mjs && node test/routing.test.mjs",
-    "test:flow": "node test/flow.test.mjs",
+    "test:flow": "node test/flow.test.mjs && node test/quiz.test.mjs",
     "test:ui": "node test/ui.smoke.mjs"
   },
   "dependencies": {
