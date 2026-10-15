@@ -30,6 +30,11 @@ function save() { store.set(STATE_KEY, JSON.stringify({ i: S.i, values: S.values
 function readCookie(name) {
   try { const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`)); return m ? decodeURIComponent(m[1]) : ''; } catch { return ''; }
 }
+// Ad / analytics tags (/tracking.js). No-ops if it's blocked or nothing is configured.
+const track = (name, data, opts) => { try { window.PDTrack?.event(name, data, opts); } catch { /* never break the quiz */ } };
+const newEventId = (p) => { try { return window.PDTrack?.newId(p) || null; } catch { return null; } };
+let quizStarted = false;
+
 function attribution() {
   const url = new URL(location.href);
   const flat = {};
@@ -38,7 +43,11 @@ function attribution() {
   try { c = window.PDAttribution?.get?.() || {}; } catch { /* blocked */ }
   const page = url.searchParams.get('page');
   return { ...flat, landing: page || `${url.origin}${url.pathname}`, referrer: document.referrer || undefined, first: c.f || null, last: c.l || null,
-    hutk: readCookie('hubspotutk'), pageUri: page && /^https?:/.test(page) ? page : `${url.origin}${url.pathname}`, pageName: document.title };
+    hutk: readCookie('hubspotutk'), ads: adCookies(), pageUri: page && /^https?:/.test(page) ? page : `${url.origin}${url.pathname}`, pageName: document.title };
+}
+
+function adCookies() {
+  try { return window.PDTrack?.cookies?.() || {}; } catch { return {}; }
 }
 
 // ── boot ────────────────────────────────────────────────────────────────────
@@ -91,7 +100,10 @@ function showIntro() {
     <p class="lead">${esc(st.introBody || '')}</p>
     <ul class="intro-list"><li>${n} questions</li><li>About 3 minutes</li><li>Instant result</li></ul>
     <div class="actions"><span class="small">Your answers stay private.</span><button class="btn btn--primary" id="go" type="button">${esc(st.startLabel || 'Start the quiz')} →</button></div>`;
-  $('#go').onclick = () => go(1);
+  $('#go').onclick = () => {
+    if (!quizStarted && !S.preview) { quizStarted = true; track('quiz_start', { content_name: 'Gap year quiz' }); }
+    go(1);
+  };
   notifyParent();
 }
 
@@ -196,14 +208,16 @@ function showContact() {
     S.busy = true; btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Working out your result…';
     try {
       let out;
+      const eventId = newEventId('quiz');
       if (S.preview) {
         const sc = scoreQuiz(S.schema, S.values);
         out = { archetype: sc.archetype, result: archetypeByKey(S.schema, sc.archetype), ranked: sc.ranked };
       } else {
-        const res = await fetch('/api/quiz/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values: S.values, hp: $('#f [name=website]').value, attribution: attribution() }) });
+        const res = await fetch('/api/quiz/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values: S.values, hp: $('#f [name=website]').value, attribution: attribution(), eventId }) });
         out = await res.json().catch(() => ({}));
         if (!res.ok) { const err = new Error(out.error || `Something went wrong (${res.status}).`); err.errors = out.errors; throw err; }
       }
+      if (!S.preview) track('quiz_lead', { content_name: 'Gap year quiz', archetype: out.archetype, travel_when: S.values.travelWhen, travel_length: S.values.travelLength }, { eventId });
       rememberForApplication();
       store.del(STATE_KEY);
       say('', '');

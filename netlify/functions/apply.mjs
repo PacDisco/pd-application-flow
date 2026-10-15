@@ -19,6 +19,7 @@ import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import { sanitizeAttribution } from "../../public/attribution-kit.mjs";
 import { createAppFeeCheckout, getCheckoutSession } from "./_lib/stripe.mjs";
+import { trackApplication, cleanEventId, feeEventId } from "./_lib/tracking.mjs";
 
 export const config = { path: "/api/apply/*" };
 
@@ -104,6 +105,10 @@ function statusBody(app, schema) {
     interviewNeeded: !app.interview_at && !!app.interview?.fallback, // admissions will arrange it
     paid: !!app.paid_at,
     paidAt: app.paid_at,
+    // Lets the browser fire the same "Purchase" the server sends, de-duplicated.
+    feeEventId: app.paid_at ? feeEventId(app.id) : null,
+    paidAmount: app.paid_at ? Number(app.payment?.base ?? 250) : null,
+    currency: String(app.payment?.currency || schema?.settings?.currency || "usd").toUpperCase(),
     fee: K.feeBreakdown(schema),
     // step-2 answers are NOT returned (health / passport data never goes back
     // to the browser); the client keeps its own unsent draft.
@@ -136,6 +141,13 @@ export async function recordPayment(appId, session) {
   const meta = session.metadata || {};
   const total = (session.amount_total ?? 0) / 100;
   const base = Number(meta.base_amount || 250);
+  const r = await markPaid(appId, session, { meta, total, base });
+  // Only the first confirmation (return page or webhook) sends the Purchase.
+  if (r.first) await trackApplication("application_fee_paid", r.app);
+  return r;
+}
+
+function markPaid(appId, session, { total, base }) {
   return A.markPaid(appId, {
     provider: "stripe",
     sessionId: session.id,
@@ -167,8 +179,12 @@ async function start(req, context) {
   }
 
   const attribution = sanitizeAttribution(body.attribution);
-  const { app, token } = await A.createFromStep1({ schema, rev, clean: res.clean, attribution, ip, userAgent: req.headers.get("user-agent") });
-  await A.triggerSync(app.id, { schema });
+  const userAgent = req.headers.get("user-agent");
+  const { app, token } = await A.createFromStep1({ schema, rev, clean: res.clean, attribution, ip, userAgent });
+  await Promise.allSettled([
+    A.triggerSync(app.id, { schema }),
+    trackApplication("application_start", app, { eventId: cleanEventId(body.eventId), ip, userAgent }),
+  ]);
   return json({ token, status: statusBody(app, schema) });
 }
 
@@ -200,7 +216,10 @@ async function step2(req) {
   }
 
   const updated = await A.saveStep2(app, { schema, rev, clean: res.clean });
-  await A.triggerSync(app.id, { schema });
+  await Promise.allSettled([
+    A.triggerSync(app.id, { schema }),
+    trackApplication("application_submit", updated, { eventId: cleanEventId(body.eventId), userAgent: req.headers.get("user-agent") }),
+  ]);
   return json({ status: statusBody(updated, schema) });
 }
 
@@ -284,7 +303,10 @@ async function interview(req) {
     return json({ status: statusBody({ ...app, interview: booking }, schema) });
   }
   const updated = await A.markInterview(app, booking);
-  await A.triggerSync(app.id, { schema });
+  await Promise.allSettled([
+    A.triggerSync(app.id, { schema }),
+    trackApplication("interview_booked", updated, { eventId: cleanEventId(body.eventId), userAgent: req.headers.get("user-agent") }),
+  ]);
   return json({ status: statusBody(updated, schema) });
 }
 

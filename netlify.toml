@@ -18,16 +18,25 @@
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     # The flow can be embedded on www.pacificdiscovery.org. Third parties:
-    # HubSpot (tracking code, meeting scheduler) and Stripe Checkout.
+    # HubSpot (tracking code, meeting scheduler), Stripe Checkout, and the ad /
+    # analytics tags loaded by /tracking.js: Meta pixel (connect.facebook.net →
+    # www.facebook.com), Google tag / GTM (GA4 + Google Ads) and TikTok pixel.
+    # 'unsafe-inline' stays OFF, so GTM "Custom HTML" tags won't run — use GTM's
+    # built-in tag templates, or add the vendor to /tracking.js.
     # js.hscollectedforms.net is deliberately NOT allowed: HubSpot's
     # "non-HubSpot forms" collector would double-submit the quiz/application —
     # the server already submits to the HubSpot form with the visitor cookie.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' https://js.hs-scripts.com https://js.hs-analytics.net https://js.hs-banner.com https://js.hsadspixel.net https://js.hubspot.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://meetings.hubspot.com https://*.hubspot.com; connect-src 'self' https://*.hubspot.com https://*.hs-banner.com https://*.hs-analytics.net https://*.hsadspixel.net; frame-ancestors 'self' https://www.pacificdiscovery.org https://pacificdiscovery.org https://dashboard.pacificdiscovery.org; form-action 'self' https://checkout.stripe.com"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://js.hs-scripts.com https://js.hs-analytics.net https://js.hs-banner.com https://js.hsadspixel.net https://js.hubspot.com https://connect.facebook.net https://www.googletagmanager.com https://*.googletagmanager.com https://www.google-analytics.com https://googleads.g.doubleclick.net https://www.googleadservices.com https://analytics.tiktok.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://meetings.hubspot.com https://*.hubspot.com https://www.facebook.com https://td.doubleclick.net https://www.googletagmanager.com; connect-src 'self' https://*.hubspot.com https://*.hs-banner.com https://*.hs-analytics.net https://*.hsadspixel.net https://www.facebook.com https://connect.facebook.net https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com https://www.google.com https://*.g.doubleclick.net https://www.googleadservices.com https://googleads.g.doubleclick.net https://analytics.tiktok.com https://*.tiktok.com https://*.tiktokw.us; frame-ancestors 'self' https://www.pacificdiscovery.org https://pacificdiscovery.org https://dashboard.pacificdiscovery.org; form-action 'self' https://checkout.stripe.com"
 
 [[headers]]
   for = "/form-kit.mjs"
   [headers.values]
     Content-Type = "text/javascript; charset=utf-8"
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/tracking.js"
+  [headers.values]
     Cache-Control = "no-cache"
 
 [[headers]]

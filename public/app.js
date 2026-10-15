@@ -102,6 +102,19 @@ function captureAttribution(url) {
   return a;
 }
 
+// Ad / analytics tags (/tracking.js). No-ops if blocked, unconfigured or in preview.
+function track(name, data, opts) {
+  if (S.preview) return;
+  try { window.PDTrack?.event(name, data, opts); } catch { /* never break the flow */ }
+}
+function newEventId(prefix) {
+  try { return window.PDTrack?.newId(prefix) || null; } catch { return null; }
+}
+function programData(st = S.status) {
+  const prog = (S.schema?.programs || []).find((p) => p.name === st?.program);
+  return { program: st?.program || undefined, program_type: prog?.type || undefined, term: st?.term || undefined };
+}
+
 function readCookie(name) {
   try { const m = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`)); return m ? decodeURIComponent(m[1]) : ''; } catch { return ''; }
 }
@@ -110,7 +123,11 @@ function attributionPayload(attr) {
   let c = {};
   try { c = window.PDAttribution?.get?.() || {}; } catch { /* blocked */ }
   const page = /^https?:/.test(attr.landing || '') && window.parent !== window ? attr.landing : `${location.origin}${location.pathname}`;
-  return { ...attr, first: c.f || null, last: c.l || null, hutk: readCookie('hubspotutk'), pageUri: page, pageName: document.title };
+  return { ...attr, first: c.f || null, last: c.l || null, hutk: readCookie('hubspotutk'), ads: adCookies(), pageUri: page, pageName: document.title };
+}
+
+function adCookies() {
+  try { return window.PDTrack?.cookies?.() || {}; } catch { return {}; }
 }
 
 // Name / email / phone carried over from the quiz (same browser, last 2 days).
@@ -239,10 +256,12 @@ function showStep1(attr) {
     const btn = e.submitter || $('#f button[type=submit]');
     busy(btn, true, 'Saving…');
     try {
-      const out = await api('start', { method: 'POST', body: { values: { ...S.form.values(), ...hiddenValues(attr) }, hp: $('#f [name=website]').value, attribution: attributionPayload(attr) } });
+      const eventId = newEventId('start');
+      const out = await api('start', { method: 'POST', body: { values: { ...S.form.values(), ...hiddenValues(attr) }, hp: $('#f [name=website]').value, attribution: attributionPayload(attr), eventId } });
       S.token = out.token;
       if (!S.preview) store.set(TOKEN_KEY, out.token);
       S.status = out.status;
+      track('application_start', programData(), { eventId });
       route();
       focusTop();
     } catch (err) {
@@ -297,9 +316,11 @@ function showStep2() {
     const btn = e.submitter || $('#f button[type=submit]');
     busy(btn, true, 'Submitting…');
     try {
-      const out = await api('step2', { method: 'POST', body: { token: S.token, values: S.form.values() } });
+      const eventId = newEventId('submit');
+      const out = await api('step2', { method: 'POST', body: { token: S.token, values: S.form.values(), eventId } });
       store.del(DRAFT_KEY, sessionStorage);
       S.status = out.status;
+      if (!out.already) track('application_submit', programData(), { eventId });
       route();
       focusTop();
     } catch (err) {
@@ -405,8 +426,10 @@ window.addEventListener('message', async (e) => {
   }
   $('#booked').innerHTML = `<div class="booked"><span aria-hidden="true">✓</span><div><strong>Interview booked${label ? ` — ${esc(label)}` : ''}</strong>A calendar invite is on its way to your email. Taking you to the last step…</div></div>`;
   try {
-    const out = await api('interview', { method: 'POST', body: { token: S.token, booking: { start: start ? String(start) : null, label, organizer: d.meetingsPayload?.bookingResponse?.organizer?.name || null } } });
+    const eventId = newEventId('interview');
+    const out = await api('interview', { method: 'POST', body: { token: S.token, eventId, booking: { start: start ? String(start) : null, label, organizer: d.meetingsPayload?.bookingResponse?.organizer?.name || null } } });
     S.status = out.status;
+    track('interview_booked', programData(), { eventId });
     setTimeout(() => { route(); focusTop(); }, 1600);
   } catch (err) {
     say('bad', `${esc(err.message)} Your interview is booked — refresh this page to continue.`);
@@ -466,6 +489,13 @@ async function showPaymentPending(sessionId) {
 // ── done ────────────────────────────────────────────────────────────────────
 function showDone() {
   const t = texts();
+  // Same event ID as the server's Purchase, so Meta / TikTok count it once.
+  const st = S.status;
+  // Only within 2 days of paying (Meta's de-duplication window), once per browser.
+  const recent = st?.paidAt && Date.now() - new Date(st.paidAt).getTime() < 2 * 864e5;
+  if (st?.paid && st.feeEventId && recent && !S.preview && window.PDTrack?.once?.(st.feeEventId)) {
+    track('application_fee_paid', { ...programData(), value: st.paidAmount ?? 250, currency: st.currency || 'USD' }, { eventId: st.feeEventId });
+  }
   view.innerHTML = `
     <div class="done">
       <div class="tick" aria-hidden="true">✓</div>

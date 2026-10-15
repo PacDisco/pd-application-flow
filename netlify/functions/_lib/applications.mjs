@@ -26,7 +26,7 @@ export const paymentSyncOn = () => flag("HUBSPOT_PAYMENT_SYNC", true);
 
 const COLS = `id, email, first_name, last_name, program, term, season, travel_year, program_type, deal_amount, status,
   answers, form_rev, jf_step1, jf_step2, step1_at, step2_at, interview_at, interview, paid_at, payment,
-  hubspot_contact_id, hubspot_deal_id, jotform_step1_id, jotform_step2_id, sync, attribution, ip, created_at, updated_at`;
+  hubspot_contact_id, hubspot_deal_id, jotform_step1_id, jotform_step2_id, sync, attribution, ip, user_agent, created_at, updated_at`;
 
 export async function byToken(token) {
   if (!token || typeof token !== "string" || token.length < 20) return null;

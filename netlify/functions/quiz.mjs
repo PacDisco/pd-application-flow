@@ -12,6 +12,7 @@ import * as K from "../../public/form-kit.mjs";
 import * as Q from "../../public/quiz-kit.mjs";
 import { sanitizeAttribution } from "../../public/attribution-kit.mjs";
 import { publishedQuiz, createResponse, triggerQuizSync, syncQuiz } from "./_lib/quiz.mjs";
+import { trackQuiz, cleanEventId } from "./_lib/tracking.mjs";
 
 export const config = { path: "/api/quiz/*" };
 
@@ -52,7 +53,9 @@ async function submit(req, context) {
   const clean = { ...a.clean, ...b.clean };
   const scored = Q.scoreQuiz(schema, clean);
   const row = await createResponse({ schema, rev, clean, scored, attribution: sanitizeAttribution(body.attribution), ip, userAgent: req.headers.get("user-agent") });
-  await triggerQuizSync(row.id, { schema });
+  // HubSpot sync and the Meta Conversions API "Lead" run side by side (the
+  // CAPI call never throws and gives up after 3 s).
+  await Promise.allSettled([triggerQuizSync(row.id, { schema }), trackQuiz(row, { eventId: cleanEventId(body.eventId) })]);
   const result = Q.archetypeByKey(schema, scored.archetype);
   return json({ id: row.id, archetype: scored.archetype, result, ranked: schema.settings?.showScores ? scored.ranked : undefined });
 }

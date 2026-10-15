@@ -152,6 +152,55 @@ Setup: run `MIGRATION-quiz.sql` (dashboard repo) in Neon; in the dashboard click
 form in both the Quiz and Apply Form settings, and publish both. Point the old
 quiz link (and any Cloudflare redirect) at `https://apply.pacificdiscovery.org/quiz`.
 
+## Tracking (Meta, Google, TikTok, GTM)
+
+The quiz and the application load ad / analytics tags from `/tracking.js`. The
+IDs live in **Netlify environment variables**, so adding or changing a code is
+an env change + redeploy, no code change. Only what's set is loaded; nothing
+loads in preview mode (`?preview=1`).
+
+| Variable | Value |
+|---|---|
+| `META_PIXEL_ID` | Meta pixel / dataset ID (Events Manager) |
+| `META_CAPI_TOKEN` | Conversions API token (Events Manager → the pixel → Settings → *Generate access token*). Server-side only, never sent to the browser |
+| `META_TEST_EVENT_CODE` | optional, e.g. `TEST12345` while testing — events appear under *Test events*. **Remove before going live** |
+| `META_GRAPH_VERSION` | optional, default `v23.0` |
+| `GA4_MEASUREMENT_ID` | `G-XXXXXXX` |
+| `GOOGLE_ADS_ID` | `AW-XXXXXXXXX` |
+| `GOOGLE_ADS_LABELS` | conversion labels per event, e.g. `quiz_lead=AbC123,application_start=DeF456,application_fee_paid=GhI789` |
+| `TIKTOK_PIXEL_ID` | TikTok pixel ID |
+| `GTM_ID` | optional `GTM-XXXXXXX`. Use GTM *or* the GA4/Ads variables, not both for the same tag, or events double |
+| `TRACKING` | `off` switches every tag and server event off |
+
+**Funnel events** (same names everywhere; also pushed to `dataLayer` as `pd_<name>`):
+
+| Event | When | Meta | GA4 | TikTok |
+|---|---|---|---|---|
+| `quiz_start` | "Start the quiz" | `QuizStart` (custom) | `quiz_start` | — |
+| `quiz_lead` | quiz submitted | **`Lead`** | `generate_lead` | `SubmitForm` |
+| `application_start` | step 1 saved | `CompleteRegistration` | `application_start` | `CompleteRegistration` |
+| `application_submit` | full application saved | `SubmitApplication` | `application_submit` | `SubmitApplication` |
+| `interview_booked` | interview booked | `Schedule` | `interview_booked` | `Schedule` |
+| `application_fee_paid` | fee paid | **`Purchase`** (value 250) | `purchase` | `CompletePayment` |
+
+**Meta Conversions API.** Every Meta event except `QuizStart` is also sent
+from the server (hashed email / phone / name, IP, user agent, `_fbp`, and `fbc`
+from the `_fbc` cookie or the stored `fbclid`), so ad blockers and iOS don't
+lose conversions. The browser and server share an event ID, so Meta counts each
+once. The `Purchase` is sent when the payment is first confirmed (return page or
+Stripe webhook), so it lands even if the applicant closes the tab at Stripe.
+
+**When embedded** on www.pacificdiscovery.org, the tags still fire inside the
+iframe (the host page's pixel counts the page view), and each event is also
+posted to the parent as `{ pdTrack: { event, eventId, data } }`.
+
+**CSP.** `netlify.toml` allows Meta, Google (gtag/GTM/Ads) and TikTok.
+`'unsafe-inline'` stays off, so GTM *Custom HTML* tags won't run: use GTM's
+built-in templates, or add the vendor to `/tracking.js` (and its domains to the CSP).
+
+**Check it:** set `META_TEST_EVENT_CODE`, take the quiz, and watch *Test events*
+in Events Manager. Each event should show *Browser* and *Server*, de-duplicated.
+
 ## Testing the flow by hand (preview mode)
 
 The quiz has the same switch: `/quiz?preview=1` scores locally and sends nothing.

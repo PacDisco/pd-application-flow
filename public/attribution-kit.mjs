@@ -47,6 +47,16 @@ export function sanitizeAttribution(raw) {
   if (/^https?:\/\//i.test(pageUri)) out.pageUri = pageUri;
   const pageName = str(a.pageName, 120);
   if (pageName) out.pageName = pageName;
+  // Ad-platform browser IDs (Meta _fbp/_fbc, TikTok _ttp) for server-side
+  // conversion events. Pseudonymous cookie values, no personal data.
+  const ads = {};
+  const fbp = str(a.ads?.fbp, 80);
+  if (/^fb\.\d\.\d{10,16}\.\d{1,30}$/.test(fbp)) ads.fbp = fbp;
+  const fbc = str(a.ads?.fbc, 500);
+  if (/^fb\.\d\.\d{10,16}\.[\w-]+$/.test(fbc)) ads.fbc = fbc;
+  const ttp = str(a.ads?.ttp, 80);
+  if (/^[\w.-]{8,80}$/.test(ttp)) ads.ttp = ttp;
+  if (Object.keys(ads).length) out.ads = ads;
   // Flat copies for the hidden utm_* fields and older readers.
   for (const k of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid']) {
     if (last?.[k]) out[k] = last[k];

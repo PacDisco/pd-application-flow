@@ -197,6 +197,7 @@ export async function startServer(port = 8899) {
   const service = (await import('../netlify/functions/service.mjs')).default;
   const file = (await import('../netlify/functions/file.mjs')).default;
   const webhook = (await import('../netlify/functions/stripe-webhook.mjs')).default;
+  const trackingConfig = (await import('../netlify/functions/tracking-config.mjs')).default;
   const root = new URL('../public/', import.meta.url).pathname;
   const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
   const server = http.createServer(async (req, res) => {
@@ -211,6 +212,7 @@ export async function startServer(port = 8899) {
     else if (url.pathname.startsWith('/api/service/')) out = await service(r);
     else if (url.pathname.startsWith('/api/file/')) out = await file(r, { params: { id: url.pathname.split('/').pop() } });
     else if (url.pathname === '/api/stripe-webhook') out = await webhook(r);
+    else if (url.pathname === '/tracking-config.js') out = await trackingConfig(r);
     if (out) {
       res.writeHead(out.status, Object.fromEntries(out.headers));
       res.end(Buffer.from(await out.arrayBuffer()));
