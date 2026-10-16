@@ -173,3 +173,41 @@ export function trackQuiz(row, { eventId } = {}) {
     custom: { content_name: "Gap year quiz", archetype: row.archetype, travel_when: answers.travelWhen, travel_length: answers.travelLength },
   }));
 }
+
+// ── Website HubSpot forms (pacificdiscovery.org) ────────────────────────────
+// Forms on the main site report submissions via /hs-form-tracking.js →
+// POST /api/track/form. Only forms listed here are accepted; add a form by
+// adding its HubSpot form GUID. `event` is the Meta event, `name` its content_name.
+export const SITE_FORMS = {
+  "a0bba9a0-aead-4667-81a9-5fa634fae057": { event: "Lead", name: "Program booklet request" },
+};
+
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,24}$/i;
+
+/** Validates a browser report of a HubSpot form submission → CAPI event, or { error }. */
+export function siteFormEvent(body, { ip, userAgent } = {}) {
+  const b = body && typeof body === "object" ? body : {};
+  const form = SITE_FORMS[String(b.formId || "")];
+  if (!form) return { error: "unknown form" };
+  const f = b.fields && typeof b.fields === "object" ? b.fields : {};
+  const email = String(f.email || "").trim().slice(0, 254);
+  if (!EMAIL_RE.test(email)) return { error: "no email" };
+  const eventId = cleanEventId(b.eventId);
+  if (!eventId) return { error: "bad event id" };
+  const page = /^https:\/\/([a-z0-9-]+\.)*pacificdiscovery\.org\//i.test(String(b.page || "")) ? String(b.page).slice(0, 300) : undefined;
+  // Same shape the attribution kit stores: ads cookies + first/last touch from pd_attr.
+  const raw = b.attr && typeof b.attr === "object" ? b.attr : {};
+  const touch = (t) => (t && typeof t === "object" && typeof t.fbclid === "string" ? { fbclid: t.fbclid.slice(0, 200), ts: String(t.ts || "").slice(0, 10) } : undefined);
+  const attr = { last: touch(raw.l), first: touch(raw.f) };
+  const ads = b.ads && typeof b.ads === "object" ? b.ads : {};
+  if (/^fb\.\d\.\d{10,16}\.\d{1,30}$/.test(String(ads.fbp || ""))) (attr.ads ||= {}).fbp = ads.fbp;
+  if (/^fb\.\d\.\d{10,16}\.[\w-]+$/.test(String(ads.fbc || "")) && String(ads.fbc).length <= 500) (attr.ads ||= {}).fbc = ads.fbc;
+  const str = (v, n) => String(v || "").trim().slice(0, n);
+  return {
+    event: buildMetaEvent({
+      name: form.event, eventId, sourceUrl: page,
+      person: { email, phone: str(f.phone || f.mobilephone, 40), first: str(f.firstname, 80), last: str(f.lastname, 80), externalId: email.toLowerCase() },
+      attr, ip, userAgent, custom: { content_name: form.name },
+    }),
+  };
+}

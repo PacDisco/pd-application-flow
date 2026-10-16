@@ -45,6 +45,12 @@
     Cache-Control = "no-cache"
 
 [[headers]]
+  for = "/hs-form-tracking.js"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"
+    Access-Control-Allow-Origin = "*"
+
+[[headers]]
   for = "/attribution.js"
   [headers.values]
     Cache-Control = "public, max-age=3600"

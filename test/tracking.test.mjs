@@ -103,4 +103,40 @@ await t('application purchase uses the fee event ID and the base fee', async () 
   } finally { globalThis.fetch = real; setEnv({}); }
 });
 
+
+await t('site form: booklet request → Lead with hashed data; unknown forms and bad input rejected', () => {
+  const ok = T.siteFormEvent({ formId: 'a0bba9a0-aead-4667-81a9-5fa634fae057', eventId: 'form_1b4e28ba-2fa1-11d2-883f-0016d3cca427',
+    fields: { email: 'Sam@Example.com', firstname: 'Sam', phone: '+64 21 555 0100' }, page: 'https://www.pacificdiscovery.org/admissions/request-program-booklet',
+    ads: { fbp: 'fb.1.1760000000000.42', fbc: 'evil<script>' }, attr: { l: { fbclid: 'IwAR0abc', ts: '2026-10-16' } } }, { ip: '203.0.113.9', userAgent: 'UA' });
+  assert.equal(ok.event.event_name, 'Lead');
+  assert.equal(ok.event.event_id, 'form_1b4e28ba-2fa1-11d2-883f-0016d3cca427');
+  assert.deepEqual(ok.event.user_data.em, [sha('sam@example.com')]);
+  assert.deepEqual(ok.event.user_data.ph, [sha('64215550100')]);
+  assert.equal(ok.event.user_data.fbp, 'fb.1.1760000000000.42');
+  assert.ok(ok.event.user_data.fbc.endsWith('.IwAR0abc'), 'bad _fbc ignored, fbclid used');
+  assert.equal(ok.event.custom_data.content_name, 'Program booklet request');
+  assert.equal(ok.event.event_source_url, 'https://www.pacificdiscovery.org/admissions/request-program-booklet');
+  assert.equal(T.siteFormEvent({ formId: '164978ff-1220-46f4-9655-9e9ee58145b2', eventId: 'form_12345678', fields: { email: 'a@b.co' } }).error, 'unknown form');
+  assert.equal(T.siteFormEvent({ formId: 'a0bba9a0-aead-4667-81a9-5fa634fae057', eventId: 'form_12345678', fields: { email: 'nope' } }).error, 'no email');
+  assert.equal(T.siteFormEvent({ formId: 'a0bba9a0-aead-4667-81a9-5fa634fae057', eventId: 'x', fields: { email: 'a@b.co' } }).error, 'bad event id');
+  assert.equal(T.siteFormEvent({ formId: 'a0bba9a0-aead-4667-81a9-5fa634fae057', eventId: 'form_12345678', fields: { email: 'a@b.co' }, page: 'https://evil.com/x' }).event.event_source_url, undefined);
+});
+
+await t('/api/track/form: origin check, CORS, sends CAPI', async () => {
+  const track = (await import('../netlify/functions/track.mjs')).default;
+  setEnv({ META_PIXEL_ID: '123456789012345', META_CAPI_TOKEN: 'tok' });
+  const real = globalThis.fetch; let sentBody;
+  globalThis.fetch = async (u, init) => { sentBody = JSON.parse(init.body); return new Response('{"events_received":1}', { status: 200 }); };
+  try {
+    const body = JSON.stringify({ formId: 'a0bba9a0-aead-4667-81a9-5fa634fae057', eventId: 'form_abcdef123', fields: { email: 'a@b.co' }, page: 'https://www.pacificdiscovery.org/x' });
+    const bad = await track(new Request('http://x/api/track/form', { method: 'POST', body, headers: { origin: 'https://evil.com' } }), { ip: '1.1.1.1' });
+    assert.equal(bad.status, 403);
+    const res = await track(new Request('http://x/api/track/form', { method: 'POST', body, headers: { origin: 'https://www.pacificdiscovery.org', 'content-type': 'text/plain', 'user-agent': 'UA' } }), { ip: '1.1.1.2' });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://www.pacificdiscovery.org');
+    assert.equal(sentBody.data[0].event_name, 'Lead');
+    assert.equal(sentBody.data[0].user_data.client_ip_address, '1.1.1.2');
+  } finally { globalThis.fetch = real; setEnv({}); }
+});
+
 console.log(`tracking: ${n} passed`);

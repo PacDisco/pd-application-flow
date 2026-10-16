@@ -201,6 +201,33 @@ built-in templates, or add the vendor to `/tracking.js` (and its domains to the 
 **Check it:** set `META_TEST_EVENT_CODE`, take the quiz, and watch *Test events*
 in Events Manager. Each event should show *Browser* and *Server*, de-duplicated.
 
+### HubSpot forms on the main site (program booklet, …)
+
+`/hs-form-tracking.js` tracks HubSpot forms embedded on www.pacificdiscovery.org.
+Add it once in GTM (container GTM-WJR7B3): **Tags → New → Custom HTML**, trigger
+**All Pages**:
+
+```html
+<script src="https://apply.pacificdiscovery.org/hs-form-tracking.js" async></script>
+```
+
+When a tracked form is submitted it fires the Meta pixel event (with an event ID),
+posts the submission to `/api/track/form`, which sends the same event through the
+Conversions API (hashed email/phone/name, IP, user agent, `_fbp`/`_fbc` or the
+`fbclid` from `pd_attr`), and pushes `pd_form_lead` to `dataLayer`.
+
+| Form | HubSpot form ID | Meta event |
+|---|---|---|
+| Request a program booklet | `a0bba9a0-aead-4667-81a9-5fa634fae057` | `Lead` (content_name "Program booklet request") |
+
+To track another form, add its ID to `FORMS` in `public/hs-form-tracking.js` **and**
+`SITE_FORMS` in `netlify/functions/_lib/tracking.mjs` (the server only accepts listed
+forms, and only from `*.pacificdiscovery.org`). Uses the same `META_PIXEL_ID` /
+`META_CAPI_TOKEN`.
+
+The browser pixel event goes to every Meta pixel on the page; the server event goes
+to `META_PIXEL_ID`.
+
 ## Testing the flow by hand (preview mode)
 
 The quiz has the same switch: `/quiz?preview=1` scores locally and sends nothing.
