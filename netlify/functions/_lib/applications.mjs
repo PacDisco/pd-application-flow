@@ -96,6 +96,41 @@ export async function markInterview(app, booking) {
   return rows[0];
 }
 
+/**
+ * The most recent FULL application (step 2 done) from this email, other than
+ * `exceptId`. The date of birth must match too, so typing someone else's
+ * email can't pull their application (health, passport) into a new one.
+ */
+export async function previousFullApplication(email, dob, exceptId) {
+  if (!email || !dob) return null;
+  const rows = await db().query(
+    `SELECT ${COLS} FROM applications
+      WHERE lower(email) = lower($1) AND step2_at IS NOT NULL AND id <> $2
+      ORDER BY step2_at DESC LIMIT 10`,
+    [String(email).trim(), exceptId],
+  );
+  return rows.find((r) => String(r.answers?.dob || "") === String(dob)) || null;
+}
+
+/**
+ * Returning applicant: copy the step-2 answers from their previous full
+ * application into this one and clear the interview, so they go straight to
+ * payment. Step-1 answers (program, dates, contact details) are the new ones.
+ */
+export async function reusePreviousApplication(app, prev, { schema, rev }) {
+  const updated = await saveStep2(app, { schema, rev, clean: pickStep(schema, "step2", prev.answers) });
+  const interview = {
+    source: "previous-application", reused: true, fromApplication: prev.id,
+    previousProgram: prev.program || null, previousTerm: prev.term || null,
+    previousInterviewAt: prev.interview_at || null, at: new Date().toISOString(),
+  };
+  const rows = await db().query(
+    `UPDATE applications SET interview = $2, updated_at = now() WHERE id = $1 RETURNING ${COLS}`,
+    [app.id, JSON.stringify(interview)],
+  );
+  return rows[0] || { ...updated, interview };
+}
+
 /** Idempotent: returns { app, first } — first=false when it was already paid. */
 export async function markPaid(appId, payment) {
   const rows = await db().query(
@@ -314,18 +349,25 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
   }
   // ── HubSpot: parents + Pacific Discovery program record (application in) ─
   // Parents are created/updated (by email) and linked to the student and the
-  // deal; student, parents and deal are linked to the matching program record
+  // deal once the full application is in; after the fee is paid, student,
+  // parents and deal are linked to the matching program record
   // (custom object 2-58411705) with the Student / Parent labels the portals
   // use to decide which tabs to show. Each part is idempotent; the program
   // link retries on every later sync until a matching record exists.
-  if (app.step2_at && (hubspotSyncOn() || paymentSyncOn()) && (!s.hsFamily || !s.hsProgram)) {
+  // The program record link waits for the application fee: only paid
+  // applicants are put on a program. (An older "couldn't link" error on an
+  // unpaid application is cleared — it will be retried once they pay.)
+  if (!app.paid_at && !s.hsProgram && s.hsProgramError) await setSync(app.id, { hsProgramError: undefined });
+  const wantFamily = !s.hsFamily;
+  const wantProgram = !s.hsProgram && !!app.paid_at;
+  if (app.step2_at && (hubspotSyncOn() || paymentSyncOn()) && (wantFamily || wantProgram)) {
     try {
-      const r = await linkFamilyAndProgram(app, schema, { family: !s.hsFamily, program: !s.hsProgram });
+      const r = await linkFamilyAndProgram(app, schema, { family: wantFamily, program: wantProgram });
       const patch = {};
       if (r.family) patch.hsFamily = ok(r.family);
       if (r.program?.record) { patch.hsProgram = ok(r.program); patch.hsProgramError = undefined; }
       else if (r.program) patch.hsProgramError = { ok: false, at: new Date().toISOString(), error: r.program.reason, candidates: r.program.candidates };
-      patch.hsFamilyError = undefined;
+      if (r.family) patch.hsFamilyError = undefined;
       await setSync(app.id, patch);
       out.hsFamily = "ok"; out.hsProgram = r.program?.record ? "ok" : r.program?.reason;
     } catch (err) { log.error("[sync family]", err.message); await setSync(app.id, { hsFamilyError: fail(err) }); out.hsFamily = err.message; }

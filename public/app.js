@@ -445,6 +445,7 @@ function showPayment() {
     ${helloLine()}
     ${S.status?.interview ? `<div class="booked"><span aria-hidden="true">✓</span><div><strong>Interview booked${S.status.interview.label ? ` — ${esc(S.status.interview.label)}` : ''}</strong>Check your email for the calendar invite.</div></div>` : ''}
     ${S.status?.interviewNeeded ? '<div class="banner banner--info"><strong>Interview:</strong> our admissions team will contact you to arrange a time.</div>' : ''}
+    ${S.status?.returning ? '<div class="banner banner--info"><strong>Welcome back!</strong> We already have your full application, so you can go straight to paying the application fee for this program.</div>' : ''}
     <h1 class="serif">${esc(t.paymentTitle || 'Pay your application fee')}</h1>
     <p class="lead">${esc(t.paymentBody || '')}</p>
     <table class="fee" aria-label="Amount due">

@@ -164,7 +164,7 @@ await t('step 2 saves, mirrors the full application, moves the deal', async () =
   assert.ok(!('128' in row.jf_step2.answers));
 });
 
-await t('application submitted: parents created and linked to student, deal and program record', async () => {
+await t('application submitted: parents created and linked to student and deal — not the program record until paid', async () => {
   const [row] = (await pool.query('SELECT * FROM applications WHERE id = $1', [appId])).rows;
   const parent = [...up.crm.contacts.values()].find((c) => c.properties.email === 'rosa@example.com');
   assert.ok(parent, 'parent contact created');
@@ -176,14 +176,8 @@ await t('application submitted: parents created and linked to student, deal and 
   assert.ok(has('contacts', pid, 'contacts', sid, 51), 'parent → student labelled Parent');
   assert.ok(has('deals', did, 'contacts', sid, 61), 'deal → student labelled Student');
   assert.ok(has('deals', did, 'contacts', pid, 62), 'deal → parent labelled Parent');
-  assert.ok(has('2-58411705', 'P1', 'contacts', sid, 32), 'Spring 2027 South America record → student, Student');
-  assert.ok(has('2-58411705', 'P1', 'contacts', pid, 30), 'program record → parent, Parent');
-  const links = row.sync.hsProgram.links;
-  assert.equal(links.find((l) => l.who === 'student')?.verified, true, 'Student label verified on read-back');
-  assert.ok(links.filter((l) => l.who !== 'student').every((l) => l.verified === true), 'Parent label verified on read-back');
-  assert.ok(has('deals', did, '2-58411705', 'P1', null), 'deal → program record');
-  assert.ok(!up.crm.assocLog.some((a) => a.toId === 'P2'), 'not the Fall 2026 departure');
-  assert.equal(row.sync.hsProgram.record.id, 'P1');
+  assert.ok(!up.crm.assocLog.some((a) => a.to === '2-58411705' || a.from === '2-58411705'), 'no program record link before the fee is paid');
+  assert.equal(row.sync.hsProgram, undefined);
   assert.equal(row.sync.hsFamily.parents.length, 1, 'no secondary parent given');
 });
 
@@ -225,6 +219,22 @@ await t('returning from Stripe marks paid and moves the deal to Spring Semester'
   assert.equal(deal.travel_year, '2027');
   assert.match(deal.payment_1, new RegExp(`^250, pi_${session.id}, \\d{4}-\\d{2}-\\d{2}$`));
   assert.equal(row.sync.hsPaid.ok, true);
+});
+
+await t('fee paid: student, parent and deal linked to the program record', async () => {
+  const [row] = (await pool.query('SELECT * FROM applications WHERE id = $1', [appId])).rows;
+  const parent = [...up.crm.contacts.values()].find((c) => c.properties.email === 'rosa@example.com');
+  const has = (from, fromId, to, toId, typeId) => up.crm.assocLog.some((a) => a.from === from && a.fromId === String(fromId) && a.to === to && a.toId === String(toId) && a.typeId === typeId);
+  const sid = row.hubspot_contact_id, did = row.hubspot_deal_id;
+  assert.ok(has('2-58411705', 'P1', 'contacts', sid, 32), 'Spring 2027 South America record → student, Student');
+  assert.ok(has('2-58411705', 'P1', 'contacts', parent.id, 30), 'program record → parent, Parent');
+  assert.ok(has('deals', did, '2-58411705', 'P1', null), 'deal → program record');
+  assert.ok(!up.crm.assocLog.some((a) => a.toId === 'P2'), 'not the Fall 2026 departure');
+  assert.equal(row.sync.hsProgram.record.id, 'P1');
+  assert.equal(row.sync.hsProgramError, undefined);
+  const links = row.sync.hsProgram.links;
+  assert.equal(links.find((l) => l.who === 'student')?.verified, true, 'Student label verified on read-back');
+  assert.ok(links.filter((l) => l.who !== 'student').every((l) => l.verified === true), 'Parent label verified on read-back');
 });
 
 await t('webhook replay is idempotent (no second payment_N)', async () => {
@@ -327,8 +337,8 @@ await t('Zap mode: full application with no payment lands in PD Applications / A
   assert.equal(d.travel_year, '2027'); assert.equal(d.amount, '10500');
   const [row] = (await pool.query(`SELECT * FROM applications WHERE email = 'nia@example.com'`)).rows;
   assert.equal(row.hubspot_deal_id, '951'); assert.equal(row.sync.hsStep2.pipeline, 'PD Applications');
-  assert.equal(row.sync.hsProgram.record.id, 'P4', 'Costa Rica Mini, Fall 2027 record');
-  assert.ok(up.crm.assocLog.some((a) => a.from === 'deals' && a.fromId === '951' && a.toId === 'P4'));
+  assert.equal(row.sync.hsProgram, undefined, 'unpaid → not on the program record yet');
+  assert.ok(!up.crm.assocLog.some((a) => a.toId === 'P4'));
 
   // no Zap deal at all → one is created in PD Applications
   const s2 = await call('start', { values: { ...step1, email: 'omar@example.com', name: { first: 'Omar', last: 'Diaz' } } });
@@ -367,6 +377,34 @@ await t('interview fallback: continue to payment, admissions emailed + HubSpot n
   // a second click doesn't email again
   await call('interview', { token: tok, booking: { fallback: true, reason: 'other' } });
   assert.equal(mails.filter((x) => /Interview needed: Zoe Kim/.test(x.subject)).length, 1);
+});
+
+await t('returning applicant (same email + DOB, full application before) goes straight to payment', async () => {
+  const jfBefore = up.jot.subs.size;
+  const r = await call('start', { values: { ...step1, email: 'Maya@Example.com', program: 'Bali Summer Program', term: 'Summer 2027' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status.step, 'payment');
+  assert.equal(r.body.status.returning, true);
+  assert.ok(!JSON.stringify(r.body).includes('asthma'), 'previous answers never sent to the browser');
+  const [row] = (await pool.query(`SELECT * FROM applications WHERE lower(email) = 'maya@example.com' ORDER BY created_at DESC LIMIT 1`)).rows;
+  assert.notEqual(row.id, appId);
+  assert.equal(row.program, 'Bali Summer Program');
+  assert.ok(row.step2_at, 'full application filled from the previous one');
+  assert.equal(row.answers.respiratoryDetails, 'Mild asthma, inhaler');
+  assert.equal(row.answers.homeCountry, 'United States');
+  assert.equal(row.interview.reused, true); assert.equal(row.interview.fromApplication, appId);
+  assert.equal(row.interview_at, null);
+  assert.ok(row.jotform_step2_id, 'full application mirrored for the new program');
+  assert.ok(up.jot.subs.size > jfBefore);
+  assert.equal(row.sync.hsProgram, undefined, 'not on the program until paid');
+  assert.equal((await call('checkout', { token: r.body.token })).status, 200, 'can pay right away');
+});
+
+await t('same email but a different date of birth starts a fresh application', async () => {
+  const r = await call('start', { values: { ...step1, dob: '2006-01-01', program: 'Bali Summer Program', term: 'Summer 2027' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.status.step, 'step2');
+  assert.equal(r.body.status.returning, false);
 });
 
 await t('rate limit: 8 applications per IP per hour', async () => {

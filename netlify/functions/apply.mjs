@@ -74,6 +74,7 @@ async function getSchema() {
 /** Has the interview step been dealt with (booked, skipped, or handed to admissions)? */
 export function interviewCleared(app, schema) {
   if (app.interview_at) return true;
+  if (app.interview?.reused) return true; // returning applicant — reuses their previous full application
   const st = schema?.settings || {};
   if (app.interview?.skipped && st.allowSkipInterview) return true;
   if (app.interview?.fallback && fallbackOn(schema)) return true;
@@ -103,6 +104,7 @@ function statusBody(app, schema) {
     term: app.term,
     interview: app.interview_at ? { at: app.interview_at, label: app.interview?.label || null } : null,
     interviewNeeded: !app.interview_at && !!app.interview?.fallback, // admissions will arrange it
+    returning: !app.paid_at && !!app.interview?.reused, // used their previous full application
     paid: !!app.paid_at,
     paidAt: app.paid_at,
     // Lets the browser fire the same "Purchase" the server sends, de-duplicated.
@@ -180,7 +182,11 @@ async function start(req, context) {
 
   const attribution = sanitizeAttribution(body.attribution);
   const userAgent = req.headers.get("user-agent");
-  const { app, token } = await A.createFromStep1({ schema, rev, clean: res.clean, attribution, ip, userAgent });
+  let { app, token } = await A.createFromStep1({ schema, rev, clean: res.clean, attribution, ip, userAgent });
+  // Same email (and date of birth) already sent a full application → reuse it
+  // and go straight to payment.
+  const prev = await A.previousFullApplication(app.email, app.answers?.dob, app.id).catch((err) => { console.warn("[start] previous application lookup:", err.message); return null; });
+  if (prev) app = await A.reusePreviousApplication(app, prev, { schema, rev });
   await Promise.allSettled([
     A.triggerSync(app.id, { schema }),
     trackApplication("application_start", app, { eventId: cleanEventId(body.eventId), ip, userAgent }),
