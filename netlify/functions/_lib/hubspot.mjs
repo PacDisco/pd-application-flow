@@ -281,9 +281,9 @@ export async function associateWithRole(contactId, objectType, recordId, roleLab
   for (const [direction, run, type] of attempts) {
     try {
       await run();
-      const verified = await hasRole(contactId, objectType, recordId, roleLabel, type.typeId);
-      if (verified !== false) return { label: type.label, typeId: type.typeId, direction, verified };
-      errors.push(`${direction}: accepted but the "${roleLabel}" label isn't on the association`);
+      const check = await roleCheck(contactId, objectType, recordId, roleLabel, type.typeId);
+      if (check.result !== false) return { label: type.label, typeId: type.typeId, direction, verified: check.result };
+      errors.push(`${direction}: wrote type ${type.typeId} ("${type.label}") but read-back shows ${check.seen.join("; ")}`);
     } catch (err) { errors.push(`${direction}: ${err.message}`); }
   }
   throw new Error(`Couldn't add the "${roleLabel}" label — ${errors.join(" | ")}`);
@@ -315,25 +315,29 @@ async function assocTypesBetween(fromType, fromId, toType, toId) {
  * as a match on either side.
  */
 export async function hasRole(contactId, objectType, recordId, roleLabel, typeId = null) {
+  return (await roleCheck(contactId, objectType, recordId, roleLabel, typeId)).result;
+}
+
+/** hasRole plus `seen`: what each side actually returned, for the sync error. */
+export async function roleCheck(contactId, objectType, recordId, roleLabel, typeId = null) {
   const want = String(roleLabel).trim().toLowerCase();
-  let defs = null;
-  const matches = async (types, fromType, toType) => {
-    if (!types) return false;
-    if (typeId != null && types.some((t) => Number(t.typeId) === Number(typeId))) return true;
-    if (types.some((t) => (t.label || "").trim().toLowerCase() === want)) return true;
-    // Labels can come back null — look the type ids up in that direction's label list.
-    defs ||= await associationLabels(fromType, toType).catch(() => []);
-    const ids = new Set(types.map((t) => Number(t.typeId)));
-    return defs.some((d) => ids.has(Number(d.typeId)) && (d.label || "").trim().toLowerCase() === want);
-  };
+  const fmt = (t) => `${t.typeId}${t.label ? ` "${t.label}"` : ""}`;
+  const seen = [];
   let readable = false;
-  for (const [fromType, fromId, toType, toId] of [[objectType, recordId, "contacts", contactId], ["contacts", contactId, objectType, recordId]]) {
-    defs = null;
+  const sides = [["program side", objectType, recordId, "contacts", contactId], ["contact side", "contacts", contactId, objectType, recordId]];
+  for (const [name, fromType, fromId, toType, toId] of sides) {
     try {
       const types = await assocTypesBetween(fromType, fromId, toType, toId);
       readable = true;
-      if (await matches(types, fromType, toType)) return true;
-    } catch { /* try the other side */ }
+      if (!types) { seen.push(`${name}: not linked`); continue; }
+      seen.push(`${name}: ${types.map(fmt).join(", ") || "no types"}`);
+      if (typeId != null && types.some((t) => Number(t.typeId) === Number(typeId))) return { result: true, seen };
+      if (types.some((t) => (t.label || "").trim().toLowerCase() === want)) return { result: true, seen };
+      // Labels can come back null — look the type ids up in that direction's label list.
+      const defs = await associationLabels(fromType, toType).catch(() => []);
+      const ids = new Set(types.map((t) => Number(t.typeId)));
+      if (defs.some((d) => ids.has(Number(d.typeId)) && (d.label || "").trim().toLowerCase() === want)) return { result: true, seen };
+    } catch (err) { seen.push(`${name}: couldn't read (${String(err.message).slice(0, 120)})`); }
   }
-  return readable ? false : null;
+  return { result: readable ? false : null, seen };
 }
