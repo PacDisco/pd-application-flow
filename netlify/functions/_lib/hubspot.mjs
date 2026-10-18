@@ -281,7 +281,7 @@ export async function associateWithRole(contactId, objectType, recordId, roleLab
   for (const [direction, run, type] of attempts) {
     try {
       await run();
-      const verified = await hasRole(contactId, objectType, recordId, roleLabel);
+      const verified = await hasRole(contactId, objectType, recordId, roleLabel, type.typeId);
       if (verified !== false) return { label: type.label, typeId: type.typeId, direction, verified };
       errors.push(`${direction}: accepted but the "${roleLabel}" label isn't on the association`);
     } catch (err) { errors.push(`${direction}: ${err.message}`); }
@@ -289,17 +289,51 @@ export async function associateWithRole(contactId, objectType, recordId, roleLab
   throw new Error(`Couldn't add the "${roleLabel}" label — ${errors.join(" | ")}`);
 }
 
-/** true / false, or null when it can't be read back. */
-export async function hasRole(contactId, objectType, recordId, roleLabel) {
-  try {
-    const data = await hs(`/crm/v4/objects/contacts/${contactId}/associations/${objectType}?limit=500`);
-    const row = (data?.results || []).find((r) => String(r.toObjectId) === String(recordId));
-    if (!row) return false;
-    const typeIds = new Set((row.associationTypes || []).map((t) => Number(t.typeId)));
-    const labelsHere = (row.associationTypes || []).map((t) => (t.label || "").toLowerCase());
-    if (labelsHere.includes(String(roleLabel).toLowerCase())) return true;
-    // Labels can come back null on paired types — compare type ids from both directions instead.
-    const defs = [...(await associationLabels("contacts", objectType).catch(() => [])), ...(await associationLabels(objectType, "contacts").catch(() => []))];
-    return defs.some((d) => typeIds.has(Number(d.typeId)) && (d.label || "").toLowerCase() === String(roleLabel).toLowerCase());
-  } catch { return null; }
+/** Association types on one record → another, read from `fromType`'s side. null if not associated. */
+async function assocTypesBetween(fromType, fromId, toType, toId) {
+  let after = null;
+  for (let i = 0; i < 20; i += 1) {
+    const qs = new URLSearchParams({ limit: "500" });
+    if (after) qs.set("after", after);
+    const data = await hs(`/crm/v4/objects/${fromType}/${fromId}/associations/${toType}?${qs}`);
+    const row = (data?.results || []).find((r) => String(r.toObjectId) === String(toId));
+    if (row) return row.associationTypes || [];
+    after = data?.paging?.next?.after || null;
+    if (!after) break;
+  }
+  return null;
+}
+
+/**
+ * Is `contactId` linked to the program record with the `roleLabel` label?
+ * true / false, or null when it can't be read back.
+ *
+ * A paired label only shows on its own side: read from the contact, HubSpot
+ * returns the contact-side half of the pair ("Program", a different type id),
+ * never "Student". So both sides are checked — the program side is where
+ * "Student" / "Parent" actually appear. `typeId` (the id just written) counts
+ * as a match on either side.
+ */
+export async function hasRole(contactId, objectType, recordId, roleLabel, typeId = null) {
+  const want = String(roleLabel).trim().toLowerCase();
+  let defs = null;
+  const matches = async (types, fromType, toType) => {
+    if (!types) return false;
+    if (typeId != null && types.some((t) => Number(t.typeId) === Number(typeId))) return true;
+    if (types.some((t) => (t.label || "").trim().toLowerCase() === want)) return true;
+    // Labels can come back null — look the type ids up in that direction's label list.
+    defs ||= await associationLabels(fromType, toType).catch(() => []);
+    const ids = new Set(types.map((t) => Number(t.typeId)));
+    return defs.some((d) => ids.has(Number(d.typeId)) && (d.label || "").trim().toLowerCase() === want);
+  };
+  let readable = false;
+  for (const [fromType, fromId, toType, toId] of [[objectType, recordId, "contacts", contactId], ["contacts", contactId, objectType, recordId]]) {
+    defs = null;
+    try {
+      const types = await assocTypesBetween(fromType, fromId, toType, toId);
+      readable = true;
+      if (await matches(types, fromType, toType)) return true;
+    } catch { /* try the other side */ }
+  }
+  return readable ? false : null;
 }

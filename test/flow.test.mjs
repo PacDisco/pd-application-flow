@@ -176,8 +176,11 @@ await t('application submitted: parents created and linked to student, deal and 
   assert.ok(has('contacts', pid, 'contacts', sid, 51), 'parent → student labelled Parent');
   assert.ok(has('deals', did, 'contacts', sid, 61), 'deal → student labelled Student');
   assert.ok(has('deals', did, 'contacts', pid, 62), 'deal → parent labelled Parent');
-  assert.ok(has('contacts', sid, '2-58411705', 'P1', 71), 'student → Spring 2027 South America record, Student');
-  assert.ok(has('contacts', pid, '2-58411705', 'P1', 72), 'parent → program record, Parent');
+  assert.ok(has('2-58411705', 'P1', 'contacts', sid, 32), 'Spring 2027 South America record → student, Student');
+  assert.ok(has('2-58411705', 'P1', 'contacts', pid, 30), 'program record → parent, Parent');
+  const links = row.sync.hsProgram.links;
+  assert.equal(links.find((l) => l.who === 'student')?.verified, true, 'Student label verified on read-back');
+  assert.ok(links.filter((l) => l.who !== 'student').every((l) => l.verified === true), 'Parent label verified on read-back');
   assert.ok(has('deals', did, '2-58411705', 'P1', null), 'deal → program record');
   assert.ok(!up.crm.assocLog.some((a) => a.toId === 'P2'), 'not the Fall 2026 departure');
   assert.equal(row.sync.hsProgram.record.id, 'P1');

@@ -123,22 +123,30 @@ export function fakeUpstreams({ pdOptions } = {}) {
       // is only accepted in its own direction.
       if (p === '/crm/v4/associations/contacts/2-58411705/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 27, label: 'Program' }, { category: 'USER_DEFINED', typeId: 29, label: 'Program' }, { category: 'USER_DEFINED', typeId: 31, label: 'Program' }] });
       if (p === '/crm/v4/associations/2-58411705/contacts/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 28, label: null }, { category: 'USER_DEFINED', typeId: 30, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 32, label: 'Student' }] });
-      if ((m = /^\/crm\/v4\/objects\/contacts\/([^/]+)\/associations\/2-58411705$/.exec(p))) {
-        const PAIR = { 30: 29, 32: 31, 28: 27 };
+      // Reading associations back, like real HubSpot: each side only sees its
+      // own half of a paired label — the contact side reads "Program" (27/29/31),
+      // the program side reads Student / Parent (32/30). Never both.
+      const PROGRAM_SIDE = { 30: 'Parent', 32: 'Student', 28: null };
+      const CONTACT_HALF = { 30: 29, 32: 31, 28: 27 };
+      const programRows = (side, id) => {
         const rows = new Map();
         for (const a of crm.assocLog) {
-          let cid, rid, t = a.typeId;
+          let cid, rid; const t = a.typeId;
           if (a.from === 'contacts' && a.to === '2-58411705') { cid = a.fromId; rid = a.toId; }
           else if (a.from === '2-58411705' && a.to === 'contacts') { cid = a.toId; rid = a.fromId; }
           else continue;
-          if (cid !== m[1]) continue;
-          const types = rows.get(rid) || [];
-          if (t == null) types.push({ category: 'HUBSPOT_DEFINED', typeId: 1, label: null });
-          else { types.push({ category: 'USER_DEFINED', typeId: PAIR[t] ?? t, label: 'Program' }); types.push({ category: 'USER_DEFINED', typeId: t, label: null }); }
-          rows.set(rid, types);
+          const [self, other] = side === 'contact' ? [cid, rid] : [rid, cid];
+          if (self !== id) continue;
+          const types = rows.get(other) || [];
+          if (t == null) types.push({ category: 'HUBSPOT_DEFINED', typeId: side === 'contact' ? 1 : 2, label: null });
+          else if (side === 'contact') types.push({ category: 'USER_DEFINED', typeId: CONTACT_HALF[t] ?? t, label: 'Program' });
+          else types.push({ category: 'USER_DEFINED', typeId: t, label: PROGRAM_SIDE[t] ?? null });
+          rows.set(other, types);
         }
-        return J({ results: [...rows].map(([rid, types]) => ({ toObjectId: rid, associationTypes: types })) });
-      }
+        return J({ results: [...rows].map(([other, types]) => ({ toObjectId: other, associationTypes: types })) });
+      };
+      if ((m = /^\/crm\/v4\/objects\/contacts\/([^/]+)\/associations\/2-58411705$/.exec(p)) && method === 'GET') return programRows('contact', m[1]);
+      if ((m = /^\/crm\/v4\/objects\/2-58411705\/([^/]+)\/associations\/contacts$/.exec(p)) && method === 'GET') return programRows('program', m[1]);
       if (p === '/crm/v3/objects/2-58411705') return J({ results: crm.programs });
       if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/(default\/)?([^/]+)\/([^/]+)$/.exec(p)) && method === 'PUT') {
         const [, from, fromId, dflt, to, toId] = m;
