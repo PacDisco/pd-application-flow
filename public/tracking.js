@@ -41,7 +41,7 @@
     application_fee_paid: { n: 'Purchase' },
   };
   var GA = { quiz_lead: 'generate_lead', application_fee_paid: 'purchase' };
-  var TIKTOK = { quiz_lead: 'SubmitForm', application_start: 'CompleteRegistration', application_submit: 'SubmitApplication', interview_booked: 'Schedule', application_fee_paid: 'CompletePayment' };
+  var TIKTOK = { quiz_lead: 'Lead', application_start: 'CompleteRegistration', application_submit: 'SubmitApplication', interview_booked: 'Schedule', application_fee_paid: 'CompletePayment' };
 
   if (on) {
     try {
@@ -81,7 +81,8 @@
             load(r + '?sdkid=' + encodeURIComponent(id) + '&lib=' + t);
           };
           ttq.load(C.tiktok);
-          ttq.page();
+          // When embedded, the host page's own pixel (via GTM) already counts the page view.
+          if (!embedded) ttq.page();
         })(window, document, 'ttq');
       }
     } catch (e) { /* never break the page */ }
@@ -118,7 +119,15 @@
     } catch (e) { /* ignore */ }
     try {
       if (C.tiktok && window.ttq && TIKTOK[name]) {
-        window.ttq.track(TIKTOK[name], clean({ content_name: data.program || data.content_name, value: value, currency: currency }), id ? { event_id: id } : undefined);
+        var program = data.program || data.content_name;
+        var tp = clean({
+          content_name: program,
+          content_type: program ? 'product' : undefined,
+          contents: program ? [{ content_id: String(program), content_name: program, quantity: 1 }] : undefined,
+          value: value,
+          currency: currency,
+        });
+        window.ttq.track(TIKTOK[name], tp, id ? { event_id: id } : undefined);
       }
     } catch (e) { /* ignore */ }
   }
