@@ -169,6 +169,8 @@ loads in preview mode (`?preview=1`).
 | `GOOGLE_ADS_ID` | `AW-XXXXXXXXX` |
 | `GOOGLE_ADS_LABELS` | conversion labels per event, e.g. `quiz_lead=AbC123,application_start=DeF456,application_fee_paid=GhI789` |
 | `TIKTOK_PIXEL_ID` | TikTok pixel ID |
+| `TIKTOK_EVENTS_API_TOKEN` | TikTok Events API token (Events Manager → the pixel → Settings → Events API → *Generate access token*). Server-side only. Without it, TikTok gets browser events only |
+| `TIKTOK_TEST_EVENT_CODE` | Optional — server events show under *Test events* while testing. Remove when done |
 | `GTM_ID` | optional `GTM-XXXXXXX`. Use GTM *or* the GA4/Ads variables, not both for the same tag, or events double |
 | `TRACKING` | `off` switches every tag and server event off |
 

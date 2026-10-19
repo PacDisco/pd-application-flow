@@ -1,5 +1,5 @@
-// Ad-platform tracking — config for the browser, and Meta Conversions API
-// (server-side events) for the quiz and the application.
+// Ad-platform tracking — config for the browser, and server-side events
+// (Meta Conversions API + TikTok Events API) for the quiz and the application.
 //
 // Every ID lives in Netlify environment variables, so codes are added or
 // changed without a code change (redeploy to pick them up):
@@ -13,6 +13,8 @@
 //   GOOGLE_ADS_LABELS      conversion labels per event, e.g.
 //                          "quiz_lead=AbC123,application_start=DeF456,application_fee_paid=GhI789"
 //   TIKTOK_PIXEL_ID        TikTok pixel
+//   TIKTOK_EVENTS_API_TOKEN  TikTok Events API access token (Events Manager → pixel → Settings)
+//   TIKTOK_TEST_EVENT_CODE   optional — events show under "Test events"
 //   GTM_ID                 Google Tag Manager container, GTM-XXXXXXX (template tags only —
 //                          the CSP blocks Custom HTML tags; see README)
 //   TRACKING               "off" switches every browser tag and server event off
@@ -33,6 +35,15 @@ export const META_EVENT = {
   application_submit: "SubmitApplication",
   interview_booked: "Schedule",
   application_fee_paid: "Purchase",
+};
+
+/** TikTok standard event for each of ours (same as public/tracking.js). */
+export const TIKTOK_EVENT = {
+  quiz_lead: "Lead",
+  application_start: "CompleteRegistration",
+  application_submit: "SubmitApplication",
+  interview_booked: "Schedule",
+  application_fee_paid: "CompletePayment",
 };
 
 const env = (k) => String(process.env[k] ?? "").trim();
@@ -140,6 +151,80 @@ export async function sendMeta(event) {
   } finally { clearTimeout(timer); }
 }
 
+// ── TikTok Events API ────────────────────────────────────────────────────────
+
+/** ttclid from the attribution cookie (last touch first). */
+export function ttclidFor(attr) {
+  const a = attr || {};
+  return a.last?.ttclid || a.first?.ttclid || undefined;
+}
+
+/**
+ * The Events API (v1.3) event (pure — tested). Same inputs as buildMetaEvent.
+ * Phone is E.164 (+ and digits, with country code), as TikTok expects.
+ */
+export function buildTikTokEvent({ name, eventId, time, sourceUrl, person = {}, attr = {}, ip, userAgent, custom = {} }) {
+  const user = {};
+  const em = norm(person.email);
+  if (em) user.email = sha(em);
+  const ph = String(person.phone || "").replace(/\D/g, "");
+  if (ph.length >= 7) user.phone = sha(`+${ph}`);
+  if (person.externalId) user.external_id = sha(String(person.externalId));
+  if (attr.ads?.ttp) user.ttp = attr.ads.ttp;
+  const ttclid = ttclidFor(attr);
+  if (ttclid) user.ttclid = ttclid;
+  if (ip) user.ip = ip;
+  if (userAgent) user.user_agent = String(userAgent).slice(0, 400);
+  const props = {};
+  if (custom.content_name) {
+    props.content_type = "product";
+    props.contents = [{ content_id: String(custom.content_name), content_name: String(custom.content_name), quantity: 1 }];
+  }
+  if (custom.value != null) props.value = custom.value;
+  if (custom.currency) props.currency = custom.currency;
+  if (custom.order_id) props.order_id = custom.order_id;
+  const ev = {
+    event: name,
+    event_time: Math.floor((time ? new Date(time).getTime() : Date.now()) / 1000),
+    user,
+    properties: props,
+  };
+  if (eventId) ev.event_id = eventId;
+  if (sourceUrl) ev.page = { url: sourceUrl };
+  return ev;
+}
+
+/** Sends one TikTok event. Never throws; resolves within ~3 s. */
+export async function sendTikTok(event) {
+  const pixel = env("TIKTOK_PIXEL_ID");
+  const token = env("TIKTOK_EVENTS_API_TOKEN");
+  if (!trackingOn() || !pixel || !token) return { skipped: "tiktok not configured" };
+  const body = { event_source: "web", event_source_id: pixel, data: [event] };
+  if (env("TIKTOK_TEST_EVENT_CODE")) body.test_event_code = env("TIKTOK_TEST_EVENT_CODE");
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const res = await fetch("https://business-api.tiktok.com/open_api/v1.3/event/track/", {
+      method: "POST", headers: { "Content-Type": "application/json", "Access-Token": token }, body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok || out.code !== 0) { console.warn("[tiktok events]", event.event, res.status, JSON.stringify(out).slice(0, 300)); return { ok: false, status: res.status, code: out.code }; }
+    return { ok: true };
+  } catch (err) {
+    console.warn("[tiktok events]", event.event, err.message);
+    return { ok: false, error: err.message };
+  } finally { clearTimeout(timer); }
+}
+
+/** Sends the same event to Meta and TikTok. Resolves { meta, tiktok }. */
+async function sendBoth(ours, args) {
+  const [meta, tiktok] = await Promise.all([
+    META_EVENT[ours] ? sendMeta(buildMetaEvent({ ...args, name: META_EVENT[ours] })) : { skipped: "no meta event" },
+    TIKTOK_EVENT[ours] ? sendTikTok(buildTikTokEvent({ ...args, name: TIKTOK_EVENT[ours] })) : { skipped: "no tiktok event" },
+  ]);
+  return { meta, tiktok };
+}
+
 const pageFor = (attr, fallbackPath) => attr?.pageUri || `${(process.env.APPLY_SITE_URL || process.env.URL || "").replace(/\/+$/, "")}${fallbackPath}`;
 const phoneOf = (m) => (m && typeof m === "object" ? `${m.cc || ""}${m.number || ""}` : String(m || ""));
 
@@ -153,25 +238,25 @@ export function trackApplication(ours, app, { eventId, ip, userAgent } = {}) {
     custom.currency = String(app.payment?.currency || "usd").toUpperCase();
     custom.order_id = app.payment?.reference || undefined;
   }
-  return sendMeta(buildMetaEvent({
-    name, eventId: ours === "application_fee_paid" ? feeEventId(app.id) : eventId,
+  return sendBoth(ours, {
+    eventId: ours === "application_fee_paid" ? feeEventId(app.id) : eventId,
     sourceUrl: pageFor(app.attribution, "/"),
     person: { email: app.email, phone: phoneOf(app.answers?.mobile), first: app.first_name, last: app.last_name, externalId: norm(app.email) },
     attr: app.attribution || {}, ip: ip || app.ip, userAgent: userAgent || app.user_agent, custom,
-  }));
+  });
 }
 
 /** Server-side Lead for a quiz response. */
 export function trackQuiz(row, { eventId } = {}) {
   if (!row) return Promise.resolve({ skipped: "no row" });
   const answers = row.answers || {};
-  return sendMeta(buildMetaEvent({
-    name: META_EVENT.quiz_lead, eventId, time: row.created_at,
+  return sendBoth("quiz_lead", {
+    eventId, time: row.created_at,
     sourceUrl: pageFor(row.attribution, "/quiz"),
     person: { email: row.email, phone: phoneOf(answers.mobile) || row.phone, first: row.first_name, last: row.last_name, externalId: norm(row.email) },
     attr: row.attribution || {}, ip: row.ip, userAgent: row.user_agent,
     custom: { content_name: "Gap year quiz", archetype: row.archetype, travel_when: answers.travelWhen, travel_length: answers.travelLength },
-  }));
+  });
 }
 
 // ── Website HubSpot forms (pacificdiscovery.org) ────────────────────────────

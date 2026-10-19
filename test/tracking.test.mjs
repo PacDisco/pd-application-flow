@@ -8,7 +8,7 @@ import trackingConfig from '../netlify/functions/tracking-config.mjs';
 let n = 0;
 const t = async (name, fn) => { await fn(); n++; console.log('  ✓', name); };
 const sha = (v) => crypto.createHash('sha256').update(v).digest('hex');
-const KEYS = ['TRACKING', 'META_PIXEL_ID', 'META_CAPI_TOKEN', 'META_TEST_EVENT_CODE', 'GA4_MEASUREMENT_ID', 'GOOGLE_ADS_ID', 'GOOGLE_ADS_LABELS', 'TIKTOK_PIXEL_ID', 'GTM_ID'];
+const KEYS = ['TRACKING', 'META_PIXEL_ID', 'META_CAPI_TOKEN', 'META_TEST_EVENT_CODE', 'GA4_MEASUREMENT_ID', 'GOOGLE_ADS_ID', 'GOOGLE_ADS_LABELS', 'TIKTOK_PIXEL_ID', 'GTM_ID', 'TIKTOK_PIXEL_ID', 'TIKTOK_EVENTS_API_TOKEN', 'TIKTOK_TEST_EVENT_CODE'];
 const setEnv = (o) => { for (const k of KEYS) delete process.env[k]; Object.assign(process.env, o); };
 
 await t('browser config: only valid IDs, never the CAPI token', () => {
@@ -136,6 +136,51 @@ await t('/api/track/form: origin check, CORS, sends CAPI', async () => {
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://www.pacificdiscovery.org');
     assert.equal(sentBody.data[0].event_name, 'Lead');
     assert.equal(sentBody.data[0].user_data.client_ip_address, '1.1.1.2');
+  } finally { globalThis.fetch = real; setEnv({}); }
+});
+
+await t('tiktok: fee payment → CompletePayment with the fee event ID, hashed E.164 phone, ttp + ttclid', async () => {
+  setEnv({ TIKTOK_PIXEL_ID: 'DBAT09JC77U4RC4DDK6G', TIKTOK_EVENTS_API_TOKEN: 'ttok', TIKTOK_TEST_EVENT_CODE: 'TEST9' });
+  const real = globalThis.fetch; let seen;
+  globalThis.fetch = async (u, init) => { seen = { u: String(u), headers: init.headers, body: JSON.parse(init.body) }; return new Response('{"code":0,"message":"OK"}', { status: 200 }); };
+  try {
+    const app = { id: '1b4e28ba-2fa1-11d2-883f-0016d3cca427', email: 'A@B.co', program: 'Southeast Asia Gap Semester',
+      answers: { mobile: { cc: '64', number: '21 555 0100' } }, payment: { base: 250, currency: 'usd', reference: 'pi_1' },
+      attribution: { ads: { ttp: 'abc123ttp.xyz' }, last: { ttclid: 'E.C.P.123' } }, ip: '1.2.3.4', user_agent: 'UA' };
+    const r = await T.trackApplication('application_fee_paid', app);
+    assert.deepEqual(r.tiktok, { ok: true });
+    assert.equal(r.meta.skipped, 'meta not configured');
+    assert.equal(seen.u, 'https://business-api.tiktok.com/open_api/v1.3/event/track/');
+    assert.equal(seen.headers['Access-Token'], 'ttok');
+    assert.equal(seen.body.event_source, 'web');
+    assert.equal(seen.body.event_source_id, 'DBAT09JC77U4RC4DDK6G');
+    assert.equal(seen.body.test_event_code, 'TEST9');
+    const ev = seen.body.data[0];
+    assert.equal(ev.event, 'CompletePayment');
+    assert.equal(ev.event_id, T.feeEventId(app.id));
+    assert.equal(ev.user.email, sha('a@b.co'));
+    assert.equal(ev.user.phone, sha('+64215550100'));
+    assert.equal(ev.user.ttp, 'abc123ttp.xyz');
+    assert.equal(ev.user.ttclid, 'E.C.P.123');
+    assert.equal(ev.properties.value, 250);
+    assert.equal(ev.properties.currency, 'USD');
+    assert.equal(ev.properties.contents[0].content_id, 'Southeast Asia Gap Semester');
+    globalThis.fetch = async () => new Response('{"code":40001,"message":"bad token"}', { status: 200 });
+    assert.equal((await T.sendTikTok(ev)).ok, false);
+    setEnv({});
+    assert.equal((await T.sendTikTok(ev)).skipped, 'tiktok not configured');
+  } finally { globalThis.fetch = real; setEnv({}); }
+});
+
+await t('tiktok: quiz → Lead with the browser event ID', async () => {
+  setEnv({ TIKTOK_PIXEL_ID: 'DBAT09JC77U4RC4DDK6G', TIKTOK_EVENTS_API_TOKEN: 'ttok' });
+  const real = globalThis.fetch; let body;
+  globalThis.fetch = async (u, init) => { body = JSON.parse(init.body); return new Response('{"code":0}', { status: 200 }); };
+  try {
+    await T.trackQuiz({ email: 'q@b.co', created_at: '2026-10-19T00:00:00Z', answers: {}, attribution: {} }, { eventId: 'quiz_1b4e28ba2fa1' });
+    assert.equal(body.data[0].event, 'Lead');
+    assert.equal(body.data[0].event_id, 'quiz_1b4e28ba2fa1');
+    assert.equal(body.data[0].event_time, Date.parse('2026-10-19T00:00:00Z') / 1000);
   } finally { globalThis.fetch = real; setEnv({}); }
 });
 
