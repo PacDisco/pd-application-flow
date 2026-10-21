@@ -4,6 +4,7 @@ import { db } from "./db.mjs";
 import * as K from "../../../public/form-kit.mjs";
 import * as Q from "../../../public/quiz-kit.mjs";
 import * as HSF from "./hsforms.mjs";
+import * as HS from "./hubspot.mjs";
 import SEED from "./quiz-seed.mjs";
 
 let _cache = null;
@@ -46,6 +47,11 @@ export async function syncQuiz(id, { schema, inline = false, force = false } = {
   if (!r) return { error: "not found" };
   if (!hsReady()) return { skipped: "HUBSPOT_TOKEN not set" };
   if (r.sync?.hubspot?.ok && !force) return { skipped: "done" };
+  try { await HS.checkPortal(); }
+  catch (err) {
+    await setSync(r.id, { hubspot: { ok: false, error: err.message.slice(0, 500), at: new Date().toISOString() } });
+    return { error: err.message };
+  }
   const sc = schema || (await publishedQuiz()).schema;
   const answers = r.answers || {};
   const phone = answers.mobile ? K.phoneText(answers.mobile) : r.phone || "";
@@ -54,8 +60,8 @@ export async function syncQuiz(id, { schema, inline = false, force = false } = {
       formGuid: String(sc.settings?.hubspotFormGuid || process.env.HUBSPOT_QUIZ_FORM_GUID || "").trim(),
       fields: { email: r.email, firstname: r.first_name || "", lastname: r.last_name || "", phone },
       attr: r.attribution || {}, ip: r.ip, conversion: "Gap year quiz", waitMs: inline ? 6000 : 30000,
-      alreadySubmitted: !!r.sync?.form?.ok,
-      extraProps: { ...Q.quizContactProps(sc, answers, r.archetype, { date: new Date(r.created_at).toISOString().slice(0, 10) }), company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery" },
+      alreadySubmitted: !!r.sync?.form?.ok, resetLeadStatus: true,
+      extraProps: { ...Q.quizContactProps(sc, answers, r.archetype, { date: new Date(r.created_at).toISOString().slice(0, 10) }), lifecyclestage: "lead", company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery" },
     });
     await setSync(r.id, {
       form: { ok: out.formOk, error: out.formError || undefined, at: new Date().toISOString() },

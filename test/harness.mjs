@@ -80,6 +80,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
     if (url.host === 'api.hubapi.com') {
       const b = body ? JSON.parse(body) : {};
       const p = url.pathname;
+      if (p === '/account-info/v3/details') return crm.portalId === null ? J({ message: 'scope' }, 403) : J({ portalId: Number(crm.portalId || 3855728) });
       if (p === '/crm/v3/objects/contacts/search') {
         const email = b.filterGroups[0].filters[0].value;
         const c = [...crm.contacts.values()].find((x) => x.properties.email === email);

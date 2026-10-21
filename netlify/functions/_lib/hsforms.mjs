@@ -66,7 +66,8 @@ export async function submitForm(formGuid, body) {
  * properties. Returns { contactId, formOk, formError, waited, dropped, created }.
  * `fields` must include email.
  */
-export async function submitAndAttribute({ formGuid, fields, attr, ip, conversion, extraProps = {}, waitMs = 30000, alreadySubmitted = false }) {
+export async function submitAndAttribute({ formGuid, fields, attr, ip, conversion, extraProps = {}, waitMs = 30000, alreadySubmitted = false, resetLeadStatus = false }) {
+  await HS.checkPortal(); // never write to another HubSpot account
   const out = { formOk: false };
   if (formGuid && !alreadySubmitted) {
     // If the HubSpot form lacks a field we send, it rejects the submission —
@@ -96,12 +97,26 @@ export async function submitAndAttribute({ formGuid, fields, attr, ip, conversio
     out.contactId = String(contact.id);
   }
   try {
-    const cur = await HS.getContact(out.contactId, [...FIRST_TOUCH_PROPS, "hs_lead_status"]);
+    const cur = await HS.getContact(out.contactId, [...FIRST_TOUCH_PROPS, "hs_lead_status", "lifecyclestage"]);
     existing = cur?.properties || {};
   } catch { /* treat as empty */ }
   const props = { ...attributionContactProps(attr, existing, { conversion }), ...extraProps };
-  if (extraProps.hs_lead_status && existing.hs_lead_status) delete props.hs_lead_status; // never reset a working lead
+  // Lead status: the quiz and the application always set it (resetLeadStatus);
+  // other callers (e.g. the referral form) never overwrite a status already set.
+  if (extraProps.hs_lead_status && existing.hs_lead_status && !resetLeadStatus) delete props.hs_lead_status;
+  if (extraProps.lifecyclestage && !lifecycleMayBecome(existing.lifecyclestage, extraProps.lifecyclestage)) delete props.lifecyclestage;
   const p = await HS.patchContact(out.contactId, props);
   out.dropped = [...(out.dropped || []), ...p.dropped];
   return out;
+}
+
+// HubSpot lifecycle stages only move forward through the API (going back means
+// clearing the field first) — and a customer or alumnus who takes the quiz
+// again is still a customer. So "lead" is only written over nothing or Subscriber.
+const STAGE_ORDER = ["subscriber", "lead", "marketingqualifiedlead", "salesqualifiedlead", "opportunity", "customer", "evangelist"];
+export function lifecycleMayBecome(current, next) {
+  if (!current) return true;
+  const a = STAGE_ORDER.indexOf(String(current));
+  const b = STAGE_ORDER.indexOf(String(next));
+  return a >= 0 && b > a; // unknown stages (Alumni, Other) are left alone
 }

@@ -189,6 +189,22 @@ export function hubspotProps(schema, answers, target) {
   return props;
 }
 
+/**
+ * Starting AND completing an application make the contact a new lead: lead
+ * status (default "NEW" = "New lead"; settings.leadStatus = "" turns it off)
+ * is ALWAYS set, whatever it was. Lifecycle stage moves to "lead" only from
+ * nothing or Subscriber (see lifecycleMayBecome).
+ */
+export function step1LeadProps(schema) {
+  const st = schema?.settings || {};
+  const leadStatus = st.leadStatus === undefined ? "NEW" : String(st.leadStatus || "");
+  return {
+    ...(leadStatus ? { hs_lead_status: leadStatus } : {}),
+    lifecyclestage: "lead",
+    company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery",
+  };
+}
+
 /** Run every outstanding sync target for one application. */
 export async function syncApplication(id, { schema, log = console, inline = false } = {}) {
   if (!(await lock(id))) return { skipped: "locked" };
@@ -214,19 +230,31 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
   const out = {};
   const answers = app.answers || {};
   const jfForms = schema?.settings?.jotform || {};
-  const hsReady = !!(process.env.HUBSPOT_TOKEN || process.env.HUBSPOT_API_KEY || process.env.HUBSPOT_PRIVATE_APP_TOKEN);
+  let hsReady = !!(process.env.HUBSPOT_TOKEN || process.env.HUBSPOT_API_KEY || process.env.HUBSPOT_PRIVATE_APP_TOKEN);
+
+  // Wrong HubSpot account → write nothing, and say so on the application.
+  if (hsReady) {
+    try { await HS.checkPortal(); }
+    catch (err) {
+      log.error("[sync portal]", err.message);
+      await setSync(app.id, { hsError: fail(err) });
+      out.hubspot = err.message;
+      hsReady = false;
+    }
+  }
 
   // ── HubSpot form submission + source properties (FIRST) ──────────────────
   // Runs before the Jotform mirror (which can fire the old Zap) and before the
   // CRM upsert, so the contact is created by the HubSpot form with the
   // visitor's cookie and HubSpot's Original Source is the real channel.
-  if (hsReady && app.step1_at && !s.hsSource) {
+  if (hsReady && app.step1_at && !s.hsSource?.ok) {
     try {
       const names = hubspotProps(schema, answers, "contact");
       const r = await HSF.submitAndAttribute({
         formGuid: String(schema?.settings?.hubspotFormGuid || process.env.HUBSPOT_STEP1_FORM_GUID || "").trim(),
         fields: { email: app.email, firstname: names.firstname || app.first_name || "", lastname: names.lastname || app.last_name || "" },
         attr: app.attribution || {}, ip: app.ip, conversion: "Application (step 1)", waitMs: inline ? 6000 : 30000,
+        extraProps: step1LeadProps(schema), resetLeadStatus: true,
       });
       await setSync(app.id, { hsSource: ok({ form: r.formOk, formError: r.formError, waited: r.waited, note: r.note, dropped: r.dropped }) });
       out.hsSource = r.formError ? `ok (form: ${r.formError})` : "ok";
@@ -274,6 +302,18 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
       await setSync(app.id, { hsError: fail(err) });
       out.hubspot = err.message;
     }
+  }
+
+  // ── Completed application → new lead again ───────────────────────────────
+  if (hsReady && app.step2_at && app.hubspot_contact_id && !s.hsLead2?.ok) {
+    try {
+      const lead = step1LeadProps(schema);
+      const cur = await HS.getContact(app.hubspot_contact_id, ["lifecyclestage"]).catch(() => null);
+      if (!HSF.lifecycleMayBecome(cur?.properties?.lifecyclestage, "lead")) delete lead.lifecyclestage;
+      const r = await HS.patchContact(app.hubspot_contact_id, lead);
+      await setSync(app.id, { hsLead2: ok({ dropped: r.dropped }) });
+      out.hsLead2 = "ok";
+    } catch (err) { log.error("[sync lead2]", err.message); await setSync(app.id, { hsLead2: fail(err) }); out.hsLead2 = err.message; }
   }
 
   // ── Alert admissions: new step-1 applicant ───────────────────────────────

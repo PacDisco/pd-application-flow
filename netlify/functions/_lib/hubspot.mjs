@@ -39,6 +39,43 @@ export async function hs(path, { method = "GET", body, fetchImpl = fetch } = {})
   throw new Error(`HubSpot ${method} ${path} kept failing (rate limited)`);
 }
 
+// ── which HubSpot account is this token for? ───────────────────────────────
+// A token from another HubSpot account (a sandbox, a test portal, another
+// brand) works perfectly — contacts are created, the sync reports "Synced" —
+// they just land somewhere nobody looks. So every sync checks the token's
+// account against HUBSPOT_PORTAL_ID (default 3855728, the Pacific Discovery
+// portal) and refuses to write anywhere else.
+
+export const expectedPortal = () => String(process.env.HUBSPOT_PORTAL_ID || "3855728").trim();
+
+let _portal = null;
+/** @returns {{ checked: boolean, portalId?: string }} — throws when the token is for another account. */
+export async function checkPortal({ fresh = false } = {}) {
+  if (!fresh && _portal && Date.now() - _portal.at < 10 * 60 * 1000) {
+    if (_portal.error) throw _portal.error;
+    return _portal.result;
+  }
+  let result = { checked: false };
+  let error = null;
+  try {
+    const info = await hs("/account-info/v3/details");
+    const id = String(info?.portalId ?? "");
+    if (id) {
+      result = { checked: true, portalId: id };
+      if (id !== expectedPortal()) {
+        error = Object.assign(new Error(`HUBSPOT_TOKEN belongs to HubSpot account ${id}, not ${expectedPortal()} — nothing was written. Replace HUBSPOT_TOKEN on the pd-apply Netlify site with a private-app token from account ${expectedPortal()} (or set HUBSPOT_PORTAL_ID if ${id} really is the right account).`), { code: "WRONG_PORTAL" });
+      }
+    }
+  } catch (err) {
+    // No permission to read account info (or not available): don't block the sync.
+    if (![401, 403, 404].includes(err.status)) throw err;
+  }
+  _portal = { at: Date.now(), result, error };
+  if (error) throw error;
+  return result;
+}
+export function __resetPortalCheck() { _portal = null; }
+
 /** Property names HubSpot complained about in a 400. */
 export function badProperties(err) {
   const names = new Set();

@@ -141,6 +141,8 @@ await t('step 2 validates conditionals server-side', async () => {
 });
 
 await t('step 2 saves, mirrors the full application, moves the deal', async () => {
+  const [pre] = (await pool.query('SELECT hubspot_contact_id FROM applications WHERE id = $1', [appId])).rows;
+  up.crm.contacts.get(pre.hubspot_contact_id).properties.hs_lead_status = 'Qualifying call';
   const r = await call('step2', { token, values: { ...step2, photo: [photo], program: 'HACK' } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.status.step, 'interview');
@@ -158,6 +160,8 @@ await t('step 2 saves, mirrors the full application, moves the deal', async () =
   assert.equal(sub.params['submission[138][year]'], '2031');
   assert.equal(up.crm.deals.get(row.hubspot_deal_id).properties.dealstage, 'a2');
   assert.equal(up.crm.contacts.get(row.hubspot_contact_id).properties.word_of_mouth_referral_name, 'Sam Lee');
+  assert.equal(up.crm.contacts.get(row.hubspot_contact_id).properties.hs_lead_status, 'NEW', 'completed application → New lead');
+  assert.equal(row.sync.hsLead2.ok, true);
   // jotform-shaped copy for the portals
   assert.equal(row.jf_step2.answers['88'].answer, 'Small');
   assert.equal(row.jf_step2.answers['92'].type, 'control_fileupload');

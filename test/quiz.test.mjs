@@ -151,14 +151,14 @@ await t('submit with a HubSpot form: form first (with cookie), then source + qui
   assert.equal(row.sync.form.ok, true);
 });
 
-await t('second quiz: first touch and working lead status are kept', async () => {
+await t('second quiz: first touch kept, lead status set back to New lead', async () => {
   const c = contactByEmail('lena@example.com');
-  c.properties.hs_lead_status = 'IN_PROGRESS';
+  c.properties.hs_lead_status = 'Admissions';
   const r = await call(quiz, 'quiz', 'submit', { values: { ...answers, ...who, motivation: 'Adventure and fun — I want to see and do new things!' }, attribution: { last: { utm_source: 'newsletter', utm_medium: 'email' }, hutk: HUTK } });
   assert.equal(r.status, 200);
   assert.equal(c.properties.pd_first_channel, 'Paid Search');
   assert.equal(c.properties.pd_last_channel, 'Email Marketing');
-  assert.equal(c.properties.hs_lead_status, 'IN_PROGRESS');
+  assert.equal(c.properties.hs_lead_status, 'NEW');
 });
 
 await t('form missing a field: retried with the email alone', async () => {
@@ -198,6 +198,69 @@ await t('application step 1: HubSpot form before the Jotform mirror; source writ
   const [app] = (await pool.query(`SELECT sync, attribution FROM applications WHERE email = 'ava@example.com'`)).rows;
   assert.equal(app.sync.hsSource.ok, true);
   assert.equal(app.attribution.hutk, HUTK);
+});
+
+const { __resetPortalCheck } = await import('../netlify/functions/_lib/hubspot.mjs');
+const startApp = (email, ip) => call(apply, 'apply', 'start', {
+  values: { name: { first: 'Noa', last: 'Lane' }, preferredName: 'Noa', dob: '2007-03-04', email, mobile: { cc: '1', number: '720 555 0199' }, gender: 'Female', program: 'South America Gap Semester', term: 'Spring 2027' },
+  attribution: attr,
+}, 'POST', ip);
+
+await t('application step 1: contact created as a New lead (lead status NEW, lifecycle lead)', async () => {
+  const r = await startApp('noa@example.com', '10.0.0.31');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = contactByEmail('noa@example.com');
+  assert.ok(c, 'contact exists');
+  assert.equal(c.properties.hs_lead_status, 'NEW');
+  assert.equal(c.properties.lifecyclestage, 'lead');
+  assert.equal(c.properties.company_tag, 'Pacific Discovery');
+});
+
+await t('application step 1: lead status always reset to New lead; lifecycle only moves forward', async () => {
+  up.crm.contacts.set('9001', { id: '9001', properties: { email: 'kim@example.com', hs_lead_status: 'Admissions', lifecyclestage: 'customer' } });
+  up.crm.contacts.set('9002', { id: '9002', properties: { email: 'sub@example.com', hs_lead_status: 'Moved to newsletter', lifecyclestage: 'subscriber' } });
+  assert.equal((await startApp('kim@example.com', '10.0.0.32')).status, 200);
+  assert.equal((await startApp('sub@example.com', '10.0.0.36')).status, 200);
+  const kim = contactByEmail('kim@example.com');
+  assert.equal(kim.properties.hs_lead_status, 'NEW');
+  assert.equal(kim.properties.lifecyclestage, 'customer');
+  const sub = contactByEmail('sub@example.com');
+  assert.equal(sub.properties.hs_lead_status, 'NEW');
+  assert.equal(sub.properties.lifecyclestage, 'lead');
+});
+
+await t('token for another HubSpot account: nothing written, error recorded, retried once fixed', async () => {
+  up.crm.portalId = '99999'; __resetPortalCheck();
+  const before = up.crm.contacts.size;
+  const r = await startApp('wrong@example.com', '10.0.0.33');
+  assert.equal(r.status, 200, 'applicant is not blocked');
+  assert.equal(up.crm.contacts.size, before, 'no contact created anywhere');
+  assert.ok(!up.calls.some((c) => c.host === 'api.hsforms.com' && c.body?.includes('wrong@example.com')), 'no form submission');
+  const [app] = (await pool.query(`SELECT id, sync FROM applications WHERE email = 'wrong@example.com'`)).rows;
+  assert.match(app.sync.hsError.error, /belongs to HubSpot account 99999, not 3855728/);
+
+  const q = await call(quiz, 'quiz', 'submit', { values: { ...answers, ...who, email: 'wrongquiz@example.com' }, attribution: attr }, 'POST', '10.0.0.34');
+  assert.equal(q.status, 200);
+  assert.equal(contactByEmail('wrongquiz@example.com'), undefined);
+  const [qr] = (await pool.query(`SELECT sync FROM quiz_responses WHERE email = 'wrongquiz@example.com'`)).rows;
+  assert.equal(qr.sync.hubspot.ok, false);
+  assert.match(qr.sync.hubspot.error, /99999/);
+
+  // Fixed token → the next sync (e.g. "Retry sync") creates the lead.
+  up.crm.portalId = '3855728'; __resetPortalCheck();
+  const { syncApplication } = await import('../netlify/functions/_lib/applications.mjs');
+  const { publishedSchema } = await import('../netlify/functions/_lib/db.mjs');
+  await syncApplication(app.id, { schema: (await publishedSchema({ fresh: true })).schema, inline: true });
+  const c = contactByEmail('wrong@example.com');
+  assert.ok(c); assert.equal(c.properties.hs_lead_status, 'NEW');
+});
+
+await t('no permission to read account info: sync carries on', async () => {
+  up.crm.portalId = null; __resetPortalCheck();
+  const r = await startApp('noscope@example.com', '10.0.0.35');
+  assert.equal(r.status, 200);
+  assert.ok(contactByEmail('noscope@example.com'));
+  up.crm.portalId = '3855728'; __resetPortalCheck();
 });
 
 console.log(`\n${n} passed`);

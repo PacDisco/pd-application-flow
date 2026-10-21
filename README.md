@@ -129,7 +129,20 @@ quiz and application step 1, the sync:
    `pd_last_*` source properties (channel, source, medium, campaign, ad click id,
    landing page, referring site), `utm_*`/`gclid`/`fbclid` if those properties
    exist, plus for the quiz `pd_quiz_archetype`, `pd_quiz_answers`, `pd_quiz_date`
-   and lead status `NEW` (only if empty).
+   and lead status `NEW`.
+
+Starting the application, completing it, and taking the quiz each set lead
+status to `NEW` ("New lead") — always, whatever it was before (admissions'
+working statuses included). Lifecycle stage moves to `lead` only from empty or
+Subscriber: HubSpot won't move a stage backwards through the API, and a
+customer or alumnus stays one.
+
+**Wrong HubSpot account guard.** Before writing anything, every sync checks
+which HubSpot account `HUBSPOT_TOKEN` belongs to (`/account-info/v3/details`)
+against `HUBSPOT_PORTAL_ID` (default `3855728`). A token from any other account
+(sandbox, test portal) is refused: nothing is written and the application /
+quiz response shows the error instead of "Synced". Fix the token, then use
+Retry sync / Resend.
 
 This runs *before* the Jotform mirror, so an old Zap firing off the mirrored
 submission can't create the contact first. Turn those Zaps off anyway.
