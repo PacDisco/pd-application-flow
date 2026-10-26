@@ -56,4 +56,19 @@ t('surcharges: card and ACH from the dashboard, with defaults', () => {
   assert.equal(withSurcharge({}, 1750).total, 1811.25);
 });
 
+t('email buttons: a link alone on its line becomes a button (messages only)', () => {
+  const md = 'Hi\n\n[Finish my application](https://x.org/?token=a)\n\nSee [terms](https://x.org/t) inline.';
+  const h = T.termsToEmailHtml(md, { buttons: true });
+  assert.match(h, /<table role="presentation"[^>]*>.*<a href="https:\/\/x\.org\/\?token=a"[^>]*>Finish my application<\/a>/s);
+  assert.match(h, /<p [^>]*>See <a href="https:\/\/x\.org\/t"/, 'inline links stay links');
+  assert.ok(!/<table/.test(T.termsToEmailHtml(md)), 'off by default (the terms)');
+});
+
+t('advisor block: Megan by default, editable, can be switched off', () => {
+  assert.equal(T.advisorBlock({}).url, 'https://meetings.hubspot.com/megan-mckelvey');
+  assert.equal(T.advisorBlock({ settings: { advisor: { url: 'https://meetings.hubspot.com/someone', label: 'Chat' } } }).label, 'Chat');
+  assert.equal(T.advisorBlock({ settings: { advisor: { enabled: false } } }), null);
+  assert.equal(T.advisorBlock({ settings: { advisor: { url: 'javascript:alert(1)' } } }), null);
+});
+
 console.log(`terms-kit: ${n} passed`);

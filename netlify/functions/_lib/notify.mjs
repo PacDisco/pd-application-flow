@@ -181,25 +181,39 @@ function termsUrl(version) {
   return `${base}/terms${version ? `?v=${version}` : ""}`;
 }
 
-/** Wraps a message (Markdown subset) + optional terms in the email layout. Pure. */
-export function familyEmailHtml(messageMd, terms) {
+export const EMAIL_LOGO_URL = process.env.EMAIL_LOGO_URL
+  || "https://comms.pureexploration.nz/hs-fs/hubfs/PD-Logo-Colour-Stacked.png?width=560&upscale=true&name=PD-Logo-Colour-Stacked.png";
+
+/**
+ * Wraps a message (Markdown subset) in the email layout. A link on its own line
+ * becomes a button. `terms` adds a button to that version of the Program Terms
+ * & Conditions — the terms themselves are not copied into the email. Pure.
+ */
+export function familyEmailHtml(messageMd, terms, advisor = null) {
+  const advisorRow = advisor ? `
+  <tr><td style="padding:18px 28px 6px;border-top:1px solid #e1e6e8;background:#f6fbfc">
+    <p style="font-size:14px;line-height:1.5;color:#3a3a3a;margin:0 0 8px">${esc(advisor.text)}</p>
+    ${TK.emailButton(advisor.label, advisor.url, { secondary: true })}
+  </td></tr>` : "";
   const termsBlock = terms ? `
-  <tr><td style="padding:24px 28px 8px;border-top:1px solid #e1e6e8">
-    <p style="font-size:12px;color:#5f666b;margin:0 0 6px;text-transform:uppercase;letter-spacing:.04em">${esc(terms.title)} · version ${esc(terms.version)}</p>
-    <p style="font-size:12px;color:#5f666b;margin:0 0 14px">Also online at <a href="${esc(termsUrl(terms.version))}" style="color:#288195">${esc(termsUrl(terms.version))}</a></p>
-    ${TK.termsToEmailHtml(terms.body, { size: 12 })}
+  <tr><td style="padding:18px 28px 22px;border-top:1px solid #e1e6e8">
+    <p style="font-size:13px;line-height:1.5;color:#5f666b;margin:0 0 8px">Your place is subject to our ${esc(terms.title)} (version ${esc(terms.version)}).</p>
+    ${TK.emailButton(`View the ${terms.title}`, termsUrl(terms.version), { secondary: true })}
   </td></tr>` : "";
   return `<!doctype html><html><body style="margin:0;padding:0;background:#f4f6f7">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f7"><tr><td align="center" style="padding:24px 12px">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;background:#ffffff;border:1px solid #e1e6e8;border-radius:12px;font-family:Arial,Helvetica,sans-serif">
-  <tr><td style="background:#288195;border-radius:12px 12px 0 0;padding:18px 28px;color:#ffffff;font-size:18px;font-weight:bold">Pacific Discovery</td></tr>
-  <tr><td style="padding:26px 28px 14px">${TK.termsToEmailHtml(messageMd, { size: 15 })}</td></tr>${termsBlock}
-</table></td></tr></table></body></html>`;
+  <tr><td align="center" style="padding:26px 28px 18px;border-bottom:4px solid #288195;border-radius:12px 12px 0 0"><img src="${esc(EMAIL_LOGO_URL)}" width="220" alt="Pacific Discovery" style="display:block;width:220px;max-width:70%;height:auto;border:0"></td></tr>
+  <tr><td style="padding:26px 28px 10px">${TK.termsToEmailHtml(messageMd, { size: 15, buttons: true })}</td></tr>${advisorRow}${termsBlock}
+</table>
+<p style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#8a9296;margin:14px 0 0">Pacific Discovery · EDA Group Limited · <a href="https://www.pacificdiscovery.org" style="color:#8a9296">pacificdiscovery.org</a></p>
+</td></tr></table></body></html>`;
 }
 
-export function familyEmailText(messageMd, terms) {
+export function familyEmailText(messageMd, terms, advisor = null) {
   const parts = [TK.termsToText(messageMd)];
-  if (terms) parts.push("", "------------------------------------------------------------", `${terms.title} (version ${terms.version})`, termsUrl(terms.version), "", TK.termsToText(terms.body));
+  if (advisor) parts.push("", `${advisor.text}`, `${advisor.label}: ${advisor.url}`);
+  if (terms) parts.push("", `${terms.title} (version ${terms.version}): ${termsUrl(terms.version)}`);
   return parts.join("\n");
 }
 
@@ -221,13 +235,16 @@ export function feeConfirmationContent(app, schema, terms) {
     interview: app.interview_at && app.interview?.label
       ? `Your interview is booked for ${app.interview.label}.`
       : app.interview_at ? "Your interview is booked — check your calendar invite for the time."
-        : "Our admissions team will be in touch to arrange your interview.",
+        : "Book your admissions interview using the button above.",
+    // Not booked yet → the email's main button is "Book your interview".
+    interviewButton: app.interview_at ? "" : `**Next step: book your interview**\n\n[Book your interview](${TK.interviewBookingUrl(schema, app)})`,
     termsUrl: termsUrl(terms?.version),
   };
   // "({term})" with no term reads badly — drop the empty brackets.
   const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "");
   const subject = TK.fillTemplate(tpl.subject, vars).replace(/\s*\(\s*\)/g, "");
-  return { subject, text: familyEmailText(body, terms), html: familyEmailHtml(body, terms), enabled: tpl.enabled };
+  const advisor = TK.advisorBlock(schema);
+  return { subject, text: familyEmailText(body, terms, advisor), html: familyEmailHtml(body, terms, advisor), enabled: tpl.enabled };
 }
 
 export async function sendFeeConfirmation(app, schema, terms) {
@@ -291,7 +308,8 @@ export function feeReminderContent(app, schema, stage, { link, closeDate } = {})
   };
   const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "");
   const subject = TK.fillTemplate(tpl.subject, vars).replace(/\s*\(\s*\)/g, "");
-  return { subject, text: familyEmailText(body, null), html: familyEmailHtml(body, null), enabled: tpl.enabled };
+  const advisor = TK.advisorBlock(schema);
+  return { subject, text: familyEmailText(body, null, advisor), html: familyEmailHtml(body, null, advisor), enabled: tpl.enabled };
 }
 
 export async function sendFeeReminder(app, schema, stage, opts) {

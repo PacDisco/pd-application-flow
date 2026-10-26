@@ -264,8 +264,12 @@ await t('fee paid: confirmation to student + parents with the terms; admissions 
   assert.match(conf[0].from, /admissions@pacificdiscovery\.org/);
   assert.equal(conf[0].replyTo, 'admissions@pacificdiscovery.org');
   assert.match(conf[0].text, /\$250/);
-  assert.match(conf[0].text, /Program Terms & Conditions \(version 1\)/);
-  assert.match(conf[0].html, /Application Process/);
+  assert.match(conf[0].text, /Program Terms & Conditions \(version 1\): https:\/\/apply\.example\.org\/terms\?v=1/);
+  assert.match(conf[0].html, /href="https:\/\/apply\.example\.org\/terms\?v=1"[^>]*>View the Program Terms &amp; Conditions</);
+  assert.ok(!/Application Process/.test(conf[0].html + conf[0].text), 'the terms are linked, not copied in');
+  assert.match(conf[0].html, /PD-Logo-Colour-Stacked\.png/);
+  assert.match(conf[0].html, /meetings\.hubspot\.com\/megan-mckelvey/);
+  assert.ok(!/Book your interview<\/a>/.test(conf[0].html), 'interview already booked → no booking button');
   assert.ok(!/\{\w+\}/.test(conf[0].text), 'no unfilled placeholders');
   assert.equal(row.sync.feeEmail.ok, true); assert.equal(row.sync.feeEmail.termsVersion, 1);
   const alert = mails.filter((m) => /^Application fee paid/.test(m.subject));
@@ -279,7 +283,7 @@ await t('fee paid: confirmation to student + parents with the terms; admissions 
   assert.deepEqual(assocs.sort(), [[String(row.hubspot_contact_id), 198], [String(parent.id), 198], [String(row.hubspot_deal_id), 210]].sort());
   assert.equal(logged[0].properties.hs_email_direction, 'EMAIL');
   assert.deepEqual(JSON.parse(logged[0].properties.hs_email_headers).to.map((x) => x.email), ['maya@example.com', 'rosa@example.com']);
-  assert.match(logged[0].properties.hs_email_html, /Program Terms/);
+  assert.match(logged[0].properties.hs_email_html, /terms\?v=1/);
   const [row2] = (await pool.query('SELECT sync FROM applications WHERE id = $1', [appId])).rows;
   assert.equal(row2.sync.feeEmailLog.ok, true);
 });

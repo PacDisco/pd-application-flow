@@ -47,12 +47,14 @@ export async function byToken(token) {
 
 /**
  * A new resume token for an emailed link. The applicant's browser token keeps
- * working; the newest 10 link tokens are kept. Returns the raw token.
+ * working, and so does every link ever emailed. Returns the raw token.
  */
 export async function addLinkToken(appId) {
   const token = newToken();
+  // Kept indefinitely: a link a family was emailed must always open their
+  // application, whenever they come back to it.
   await db().query(
-    `UPDATE applications SET link_token_hashes = (ARRAY[$2::text] || link_token_hashes)[1:10] WHERE id = $1`,
+    `UPDATE applications SET link_token_hashes = ARRAY[$2::text] || link_token_hashes WHERE id = $1`,
     [appId, hashToken(token)]);
   return token;
 }

@@ -62,11 +62,26 @@ await t('schedule: a reminder switched off in the dashboard is skipped, not sent
   assert.deepEqual(R.reminderAction({ ...base, step2_at: ago(4.5), reminders: { sent: { 1: { at: ago(3) } } } }, s3, now), { action: 'skip', stage: 2, skip: [] });
 });
 
+await t('fee confirmation: "Book your interview" is the main button until they have booked', async () => {
+  const app = { ...base, first_name: 'Maya', last_name: 'Ortiz', email: 'maya@example.com', program: 'South America Gap Semester', term: 'Spring 2027', answers: {}, paid_at: ago(0.1), payment: { base: 250, total: 258.75, currency: 'usd', reference: 'pi_1' } };
+  const c = N.feeConfirmationContent(app, { settings: { appFee: 250 } }, null);
+  assert.match(c.html, /<a href="https:\/\/meetings\.hubspot\.com\/eda-admissions\/pacific-discovery-interviews\?firstName=Maya&amp;lastName=Ortiz&amp;email=maya%40example\.com"[^>]*>Book your interview<\/a>/);
+  assert.ok(c.html.indexOf('Book your interview</a>') < c.html.indexOf('What happens next'), 'it comes first');
+  assert.match(c.text, /Next step: book your interview/);
+  const booked = N.feeConfirmationContent({ ...app, interview_at: ago(1), interview: { label: 'Tue 3 Nov, 9:00 AM' } }, { settings: {} }, null);
+  assert.ok(!/Book your interview<\/a>/.test(booked.html));
+  assert.match(booked.text, /Your interview is booked for Tue 3 Nov, 9:00 AM\./);
+  assert.ok(!/\{\w+\}/.test(c.text + booked.text), 'no unfilled placeholders');
+});
+
 await t('content: next step depends on the interview; link and close date filled', async () => {
   const app = { ...base, first_name: 'Maya', program: 'South America Gap Semester', term: 'Spring 2027', answers: { preferredName: 'Maya' } };
   const c1 = N.feeReminderContent(app, schema, 1, { link: 'https://apply.example.org/?token=abc' });
   assert.match(c1.text, /book your interview and pay the \$250 application fee/);
-  assert.match(c1.html, /href="https:\/\/apply\.example\.org\/\?token=abc"/);
+  assert.match(c1.html, /<a href="https:\/\/apply\.example\.org\/\?token=abc"[^>]*>Finish my application<\/a>/);
+  assert.match(c1.html, /border-radius:8px;background:#288195/, 'the link is a button');
+  assert.match(c1.html, /href="https:\/\/meetings\.hubspot\.com\/megan-mckelvey"[^>]*>Book a call with an advisor</);
+  assert.match(c1.text, /Book a call with an advisor: https:\/\/meetings\.hubspot\.com\/megan-mckelvey/);
   const c4 = N.feeReminderContent({ ...app, interview_at: ago(3) }, schema, 4, { link: 'https://x.org/', closeDate: '2026-12-10T00:00:00Z' });
   assert.match(c4.text, /close your application on December 10/);
   assert.equal(c4.subject, 'Should we keep your application open?');
@@ -122,6 +137,17 @@ await t('the emailed link opens the application (and the original token still wo
   assert.equal(body.email, 'day1@x.org');
   assert.equal((await rem(a1)).link_token_hashes.length, 1);
   assert.equal(await A.byToken('not-a-real-token-but-long-enough'), null);
+});
+
+await t('a closed application still opens from its link and can go on to pay', async () => {
+  assert.ok((await rem(a29)).reminders.closedAt);
+  const tok = await A.addLinkToken(a29);
+  for (let i = 0; i < 15; i++) await A.addLinkToken(a29); // many emails later…
+  const r = await apply(new Request(`https://apply.example.org/api/apply/status?token=${tok}`));
+  const body = await r.json();
+  assert.equal(r.status, 200, 'the first link still works after many more');
+  assert.ok(['interview', 'payment'].includes(body.step), body.step);
+  assert.equal(body.paid, false);
 });
 
 await t('a failed send is released and retried on the next run', async () => {
