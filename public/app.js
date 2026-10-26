@@ -7,6 +7,7 @@
 // re-derived from /api/apply/status, so reloading or coming back later works.
 
 import { renderStep, FORM_CSS, esc, safeHtml } from '/form-kit.mjs';
+import { feePolicyText } from '/terms-kit.mjs';
 
 const TOKEN_KEY = 'pd-apply-token';
 const ATTR_KEY = 'pd-apply-attribution';
@@ -453,6 +454,7 @@ function showPayment() {
       <tr><td>Card processing fee (${pct})</td><td>${money(fee.surcharge)}</td></tr>
       <tr class="total"><td>Total today</td><td>${money(fee.total)}</td></tr>
     </table>
+    <p class="small fee-policy">${esc(feePolicyText({ settings: S.schema?.settings }, money(fee.base).replace(/\.00$/, '')))} By paying you agree to our <a href="/terms" target="_blank" rel="noopener">Program Terms &amp; Conditions</a>.</p>
     <div class="actions">
       <span class="small">Secure payment by Stripe. You'll come straight back here afterwards.</span>
       <button class="btn btn--go" type="button" id="pay">Pay ${money(fee.total)} →</button>

@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/form-kit.test.mjs && node test/routing.test.mjs && node test/tracking.test.mjs",
+    "test": "node test/form-kit.test.mjs && node test/terms-kit.test.mjs && node test/routing.test.mjs && node test/tracking.test.mjs",
     "test:flow": "node test/flow.test.mjs && node test/quiz.test.mjs",
     "test:ui": "node test/ui.smoke.mjs"
   },

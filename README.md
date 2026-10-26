@@ -8,7 +8,7 @@ The four-step application flow, hosted on Netlify (e.g. `apply.pacificdiscovery.
 | 2 · Application | The full application (mirrors Jotform form `240277257210046`), incl. photo upload | Saved + mirrored into Jotform form 2 with the same field IDs (identity fields carried over from step 1). HubSpot contact updated with any mapped fields. Unless the fee is already paid, the deal is put in **PD Applications → Application Complete**. If neither pd-apply nor the Zap has made a deal yet, one is created there; if the Zap put it in another pipeline, it's moved. Parent/guardian contacts are created (by email) and associated to the student (**Parent** label) and the deal; the student, parents and deal are associated to the matching **Pacific Discovery program** record (custom object `2-58411705`, matched by program + season + year from its start date) with the **Student** / **Parent** labels the portals use. |
 | 3 · Interview | Books a time in the embedded HubSpot scheduler (`eda-admissions/pacific-discovery-interviews`), prefilled with name + email | The booking moves them on automatically. A note is added to the HubSpot contact/deal. |
 |   | *Can't book?* | After 30 seconds (or straight away if the scheduler doesn't load) a **"Can't find a time, or the calendar won't load?"** option appears. They pick a reason, add an optional note, and continue to payment; admissions@ gets an **Interview needed** email and a note is added in HubSpot. Shown as *Interview needed* in the dashboard. Switch off or change the delay under *Fee, interview & text*. |
-| 4 · Application fee | Pays **$250 + 3.5 % card fee = $258.75** via Stripe Checkout | Payment confirmed (return page + webhook, idempotent). Deal moved to the right **program pipeline** → **Application Fee Received**, with `pd_program`, `travel_year` and `payment_N = "250, pi_…, YYYY-MM-DD"`. |
+| 4 · Application fee | Pays **$250 + 3.5 % card fee = $258.75** via Stripe Checkout. The refund wording (dashboard → *Fee, interview & text*) and a link to the Program Terms & Conditions are shown on the payment screen and on Stripe's page. | Payment confirmed (return page + webhook, idempotent). The live terms version is recorded on the payment. The student **and every parent/guardian** get the "application fee received" email from admissions@ with the terms at the bottom, and admissions@ gets a "fee paid" alert (both once; only for fees paid in the last 3 days, so re-syncing an old application never emails anyone). Deal moved to the right **program pipeline** → **Application Fee Received**, with `pd_program`, `travel_year` and `payment_N = "250, pi_…, YYYY-MM-DD"`. |
 
 Applicants can leave and come back. Their place is kept in the browser and every screen is rebuilt from the server.
 
@@ -283,3 +283,24 @@ TEST_PG_URL=postgres://… npm run test:ui     # the whole flow in Chromium, des
 ```
 
 The flow and UI tests run the real functions against a local Postgres (with `MIGRATION-apply.sql` applied). HubSpot, Jotform and Stripe are faked in `test/harness.mjs`.
+
+## Program Terms & Conditions
+
+Edited and published in the dashboard (Apply Form → **Terms**; tables in pd-dashboard's `MIGRATION-terms.sql`). This site serves them:
+
+| | |
+|---|---|
+| `GET /api/terms` | live version as `{ title, version, publishedAt, markdown, html }` — any origin may read it |
+| `GET /api/terms?v=3` | a specific version (what a family agreed to) |
+| `/terms` | stand-alone page (`/terms?v=3` for a version) |
+| `/terms-embed.js` | the website embed: `<div id="pd-terms"></div><script src="https://apply.pacificdiscovery.org/terms-embed.js" defer></script>` |
+
+Format and email helpers are in `public/terms-kit.mjs` (pinned copy in the dashboard's `apply-form/`).
+
+## Emails to families
+
+Sent to the student and every parent/guardian email on the application, **from** `APPLICANT_FROM_EMAIL` (default `admissions@pacificdiscovery.org`, display name `APPLICANT_FROM_NAME`, default "Pacific Discovery Admissions"), reply-to the same, through the existing `SMTP_USER` / `SMTP_PASS` mailbox.
+
+**Gmail only uses that From address if the `SMTP_USER` mailbox is allowed to send as it.** Either set `SMTP_USER` to the admissions@ mailbox (with its own App Password), or in the `SMTP_USER` mailbox go to Settings → Accounts → *Send mail as* → add admissions@pacificdiscovery.org. Otherwise Gmail silently sends from `SMTP_USER`.
+
+Wording is edited in the dashboard (Fee, interview & text → *Email: application fee received*); empty fields use the defaults in `terms-kit.mjs`.

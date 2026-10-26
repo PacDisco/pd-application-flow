@@ -37,7 +37,7 @@ async function customerFor(email, name) {
  * Checkout for the application fee. Two line items so the receipt shows the
  * card fee separately: Application fee $250 + Card processing fee (3.5%).
  */
-export async function createAppFeeCheckout({ app, fee, currency, successUrl, cancelUrl, dealId }) {
+export async function createAppFeeCheckout({ app, fee, currency, successUrl, cancelUrl, dealId, policy = "", termsVersion = null }) {
   const customer = await customerFor(app.email, [app.first_name, app.last_name].filter(Boolean).join(" "));
   const p = new URLSearchParams();
   p.append("mode", "payment");
@@ -56,6 +56,8 @@ export async function createAppFeeCheckout({ app, fee, currency, successUrl, can
     p.append(`line_items[${i}][price_data][unit_amount]`, String(Math.round(amount * 100)));
     p.append(`line_items[${i}][price_data][product_data][name]`, name);
   });
+  // Shown above the Pay button on Stripe's page (Stripe caps it at 1200 chars).
+  if (policy) p.append("custom_text[submit][message]", String(policy).slice(0, 1200));
   p.append("success_url", successUrl);
   p.append("cancel_url", cancelUrl);
   const meta = {
@@ -70,6 +72,7 @@ export async function createAppFeeCheckout({ app, fee, currency, successUrl, can
     travel_term: String(app.term || ""),
     source: "pd-apply",
     ...(dealId ? { deal_id: String(dealId) } : {}),
+    ...(termsVersion ? { terms_version: String(termsVersion) } : {}),
   };
   for (const [k, v] of Object.entries(meta)) {
     p.append(`metadata[${k}]`, v);

@@ -19,6 +19,8 @@ import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import { sanitizeAttribution } from "../../public/attribution-kit.mjs";
 import { createAppFeeCheckout, getCheckoutSession } from "./_lib/stripe.mjs";
+import { publishedTermsOrNull } from "./_lib/terms.mjs";
+import * as TK from "../../public/terms-kit.mjs";
 import { trackApplication, cleanEventId, feeEventId } from "./_lib/tracking.mjs";
 
 export const config = { path: "/api/apply/*" };
@@ -149,8 +151,12 @@ export async function recordPayment(appId, session) {
   return r;
 }
 
-function markPaid(appId, session, { total, base }) {
+function markPaid(appId, session, { meta, total, base }) {
+  const tv = Number(meta?.terms_version);
   return A.markPaid(appId, {
+    // The terms version shown on the payment screen / Stripe page (null when
+    // no terms had been published yet).
+    termsVersion: Number.isInteger(tv) && tv > 0 ? tv : null,
     provider: "stripe",
     sessionId: session.id,
     reference: session.payment_intent || session.id,
@@ -331,8 +337,12 @@ async function checkout(req) {
   const fee = K.feeBreakdown(schema);
   const base = siteUrl();
   const ret = `${base}/?token=${encodeURIComponent(body.token)}`;
+  const currency = String(schema.settings?.currency || "usd").toLowerCase();
+  const terms = await publishedTermsOrNull();
+  const feeLabel = new Intl.NumberFormat("en-US", { style: "currency", currency: currency.toUpperCase(), maximumFractionDigits: 0 }).format(fee.base);
+  const policy = [TK.feePolicyText(schema, feeLabel), terms ? `Program Terms & Conditions: ${base}/terms?v=${terms.version}` : ""].filter(Boolean).join(" ");
   const session = await createAppFeeCheckout({
-    app, fee, currency: String(schema.settings?.currency || "usd").toLowerCase(),
+    app, fee, currency, policy, termsVersion: terms?.version ?? null,
     successUrl: `${ret}&paid=1&session_id={CHECKOUT_SESSION_ID}`,
     cancelUrl: `${ret}&cancelled=1`,
     dealId: app.hubspot_deal_id,

@@ -18,7 +18,9 @@ import * as HS from "./hubspot.mjs";
 import * as HSF from "./hsforms.mjs";
 import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
-import { alertOn, sendStep1Alert, sendInterviewNeededAlert } from "./notify.mjs";
+import { alertOn, mailOn, sendStep1Alert, sendInterviewNeededAlert, sendFeeConfirmation, sendFeePaidAlert, familyRecipients } from "./notify.mjs";
+import { publishedTermsOrNull } from "./terms.mjs";
+import { emailTemplate } from "../../../public/terms-kit.mjs";
 
 export const mirrorOn = () => flag("JOTFORM_MIRROR", true);
 export const hubspotSyncOn = () => flag("HUBSPOT_SYNC", true);
@@ -168,6 +170,8 @@ async function unlock(id) {
   const rows = await db().query(`UPDATE applications SET sync_lock = NULL WHERE id = $1 RETURNING sync_pending`, [id]);
   return !!rows[0]?.sync_pending;
 }
+
+export const FEE_EMAIL_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 const ok = (extra = {}) => ({ ok: true, at: new Date().toISOString(), ...extra });
 const fail = (err) => ({ ok: false, at: new Date().toISOString(), error: String(err?.message || err).slice(0, 500) });
@@ -342,6 +346,29 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
     }
     if (errs.length) { await setSync(app.id, { interviewNeededError: { ok: false, at: new Date().toISOString(), error: errs.join("; ") } }); out.interviewNeeded = errs.join("; "); }
     else { await setSync(app.id, { interviewNeeded: ok(res), interviewNeededError: undefined }); out.interviewNeeded = "ok"; }
+  }
+
+  // ── Application fee paid → confirmation to the family + alert admissions ─
+  // Student and parents get the receipt + next steps with the terms they were
+  // shown at checkout (the version is recorded on the payment). Only for fees
+  // paid in the last 3 days, so a "Retry sync" on an old application never
+  // emails a family out of the blue.
+  const paidRecently = app.paid_at && Date.now() - new Date(app.paid_at).getTime() < FEE_EMAIL_WINDOW_MS;
+  if (paidRecently && !s.feeEmail && mailOn() && emailTemplate(schema, "feeConfirmation").enabled) {
+    try {
+      const v = app.payment?.termsVersion;
+      const terms = await publishedTermsOrNull(v ? { version: v } : {});
+      const to = await sendFeeConfirmation(app, schema, terms);
+      await setSync(app.id, { feeEmail: ok({ to, termsVersion: terms?.version ?? null }), feeEmailError: undefined });
+      out.feeEmail = "ok";
+    } catch (err) { log.error("[sync feeEmail]", err.message); await setSync(app.id, { feeEmailError: fail(err) }); out.feeEmail = err.message; }
+  }
+  if (paidRecently && !s.feeAlert && alertOn()) {
+    try {
+      const to = await sendFeePaidAlert(app);
+      await setSync(app.id, { feeAlert: ok({ to }), feeAlertError: undefined });
+      out.feeAlert = "ok";
+    } catch (err) { log.error("[sync feeAlert]", err.message); await setSync(app.id, { feeAlertError: fail(err) }); out.feeAlert = err.message; }
   }
 
   if (!hsReady) return out;

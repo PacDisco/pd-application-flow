@@ -16,6 +16,13 @@ Object.assign(process.env, {
 const schema = JSON.parse(readFileSync(new URL('../scripts/seed-schema.json', import.meta.url)));
 schema.programs.find((p) => p.name === 'South America Gap Semester').pdProgram = 'South America Semester';
 const { pool } = await setupDb(schema);
+// Program Terms & Conditions v1 (MIGRATION-terms.sql), as the dashboard publishes them.
+const TERMS_V1 = '# Program Terms & Conditions\n\n## 1. Application Process\n\nA **$250 application fee** is refunded in full if you are not accepted.\n\n1. Deposit of $2,250 on acceptance.\n2. Balance per your payment plan.\n';
+await pool.query('DELETE FROM apply_terms_versions; DELETE FROM apply_terms');
+await pool.query(`INSERT INTO apply_terms (id, draft) VALUES ('program-terms', $1)`, [TERMS_V1]);
+await pool.query(`INSERT INTO apply_terms_versions (doc_id, version, title, body, published_by) VALUES ('program-terms', 1, 'Program Terms & Conditions', $1, 'test')`, [TERMS_V1]);
+const terms = (await import('../netlify/functions/terms.mjs')).default;
+(await import('../netlify/functions/_lib/terms.mjs')).__clearTermsCache();
 globalThis.__applyTestStore = memoryStore();
 const up = fakeUpstreams();
 const apply = (await import('../netlify/functions/apply.mjs')).default;
@@ -208,6 +215,12 @@ await t('checkout: $250 + $8.75 card fee', async () => {
   assert.equal(session.client_reference_id, appId);
   assert.equal(session.metadata.processing_fee_rate, '0.035');
   assert.ok(session.success_url.includes('session_id={CHECKOUT_SESSION_ID}'));
+  // Refund wording + the terms they're agreeing to, on Stripe's page
+  const msg = session.form.get('custom_text[submit][message]');
+  assert.match(msg, /refunded in full if your application isn't accepted/);
+  assert.match(msg, /non-refundable/);
+  assert.ok(msg.includes('https://apply.example.org/terms?v=1'), msg);
+  assert.equal(session.metadata.terms_version, '1');
 });
 
 await t('returning from Stripe marks paid and moves the deal to Spring Semester', async () => {
@@ -241,6 +254,36 @@ await t('fee paid: student, parent and deal linked to the program record', async
   assert.ok(links.filter((l) => l.who !== 'student').every((l) => l.verified === true), 'Parent label verified on read-back');
 });
 
+await t('fee paid: confirmation to student + parents with the terms; admissions alerted', async () => {
+  const [row] = (await pool.query('SELECT * FROM applications WHERE id = $1', [appId])).rows;
+  assert.equal(row.payment.termsVersion, 1, 'payment records the terms version shown at checkout');
+  const conf = mails.filter((m) => /^Application received/.test(m.subject));
+  assert.equal(conf.length, 1);
+  const to = conf[0].to.split(', ');
+  assert.ok(to.includes('maya@example.com') && to.includes('rosa@example.com'), conf[0].to);
+  assert.match(conf[0].from, /admissions@pacificdiscovery\.org/);
+  assert.equal(conf[0].replyTo, 'admissions@pacificdiscovery.org');
+  assert.match(conf[0].text, /\$250/);
+  assert.match(conf[0].text, /Program Terms & Conditions \(version 1\)/);
+  assert.match(conf[0].html, /Application Process/);
+  assert.ok(!/\{\w+\}/.test(conf[0].text), 'no unfilled placeholders');
+  assert.equal(row.sync.feeEmail.ok, true); assert.equal(row.sync.feeEmail.termsVersion, 1);
+  const alert = mails.filter((m) => /^Application fee paid/.test(m.subject));
+  assert.equal(alert.length, 1);
+  assert.equal(alert[0].to, 'admissions@pacificdiscovery.org');
+});
+
+await t('/api/terms: live version for the website (CORS), specific versions, 404 for unknown', async () => {
+  const r = await terms(new Request('https://apply.example.org/api/terms'));
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('access-control-allow-origin'), '*');
+  const b = await r.json();
+  assert.equal(b.version, 1); assert.match(b.html, /<strong>\$250 application fee<\/strong>/); assert.match(b.html, /<ol>/);
+  assert.equal((await terms(new Request('https://apply.example.org/api/terms?v=1'))).status, 200);
+  assert.equal((await terms(new Request('https://apply.example.org/api/terms?v=9'))).status, 404);
+  assert.equal((await terms(new Request('https://apply.example.org/api/terms?v=abc'))).status, 400);
+});
+
 await t('webhook replay is idempotent (no second payment_N)', async () => {
   const payload = JSON.stringify({ type: 'checkout.session.completed', data: { object: session } });
   const ts = Math.floor(Date.now() / 1000);
@@ -252,6 +295,15 @@ await t('webhook replay is idempotent (no second payment_N)', async () => {
   assert.ok(!up.crm.deals.get(row.hubspot_deal_id).properties.payment_2);
   const bad = await webhook(new Request('https://apply.example.org/api/stripe-webhook', { method: 'POST', headers: { 'stripe-signature': `t=${ts},v1=deadbeef` }, body: payload }));
   assert.equal(bad.status, 400);
+  assert.equal(mails.filter((m) => /^Application received/.test(m.subject)).length, 1, 'no second confirmation');
+});
+
+await t('a resync of an application paid long ago never emails the family', async () => {
+  const before = mails.length;
+  await pool.query(`UPDATE applications SET paid_at = now() - interval '10 days', sync = sync - 'feeEmail' - 'feeAlert' WHERE id = $1`, [appId]);
+  const { syncApplication } = await import('../netlify/functions/_lib/applications.mjs');
+  await syncApplication(appId, { schema, log: { error() {}, warn() {}, log() {} } });
+  assert.equal(mails.length, before);
 });
 
 const svc = (path, init = {}) => service(new Request(`https://apply.example.org/api/service/${path}`, { ...init, headers: { 'x-apply-key': 'svc', ...(init.headers || {}) } }));
