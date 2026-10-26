@@ -232,6 +232,37 @@ export async function addNote(html, { contactId, dealId } = {}) {
   return hs("/crm/v3/objects/notes", { method: "POST", body: { properties: { hs_note_body: html, hs_timestamp: new Date().toISOString() }, associations } });
 }
 
+/**
+ * Log an email we sent on the contacts' (and deal's) activity timeline, as a
+ * logged outgoing email (CRM Emails object). HubSpot-defined association
+ * types: email→contact 198, email→deal 210.
+ */
+export async function logEmail({ subject, html, text, from, to = [], contactIds = [], dealId = null, at = new Date() }) {
+  const associations = [];
+  for (const id of [...new Set(contactIds.filter(Boolean).map(String))]) {
+    associations.push({ to: { id }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 198 }] });
+  }
+  if (dealId) associations.push({ to: { id: String(dealId) }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 210 }] });
+  const addr = (s) => { const m = /<([^>]+)>/.exec(String(s || "")); return (m ? m[1] : String(s || "")).trim(); };
+  const name = (s) => { const m = /^"?([^"<]+)"?\s*</.exec(String(s || "")); return m ? m[1].trim() : ""; };
+  const headers = { from: { email: addr(from), firstName: name(from) }, to: to.map((email) => ({ email })), cc: [], bcc: [] };
+  return hs("/crm/v3/objects/emails", {
+    method: "POST",
+    body: {
+      properties: {
+        hs_timestamp: new Date(at).toISOString(),
+        hs_email_direction: "EMAIL",
+        hs_email_status: "SENT",
+        hs_email_subject: String(subject || "").slice(0, 500),
+        hs_email_html: html || "",
+        hs_email_text: text || "",
+        hs_email_headers: JSON.stringify(headers),
+      },
+      associations,
+    },
+  });
+}
+
 // ── associations ───────────────────────────────────────────────────────────
 
 const _labels = new Map();

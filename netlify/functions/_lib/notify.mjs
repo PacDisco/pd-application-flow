@@ -236,7 +236,7 @@ export async function sendFeeConfirmation(app, schema, terms) {
   const { subject, text, html } = feeConfirmationContent(app, schema, terms);
   const { from, replyTo } = applicantFrom();
   await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
-  return to;
+  return { to, from, subject, text, html };
 }
 
 /** "Fee paid" alert to admissions@. Pure (tested). */
@@ -300,5 +300,5 @@ export async function sendFeeReminder(app, schema, stage, opts) {
   const { subject, text, html } = feeReminderContent(app, schema, stage, opts);
   const { from, replyTo } = applicantFrom();
   await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
-  return to;
+  return { to, from, subject, text, html };
 }

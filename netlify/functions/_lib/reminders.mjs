@@ -20,6 +20,7 @@ import { db } from "./db.mjs";
 import { siteUrl } from "./http.mjs";
 import * as A from "./applications.mjs";
 import { mailOn, sendFeeReminder } from "./notify.mjs";
+import { logFamilyEmail } from "./email-log.mjs";
 import { FEE_REMINDER_DAYS, FEE_CLOSE_DAYS, emailTemplate } from "../../../public/terms-kit.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -136,9 +137,15 @@ export async function runReminders({ schema, now = new Date(), log = console } =
     try {
       const token = await A.addLinkToken(app.id);
       const link = `${siteUrl()}/?token=${encodeURIComponent(token)}`;
-      const to = await sendFeeReminder(app, schema, act.stage, { link, closeDate: closeDate(app.step2_at) });
-      await record(app.id, act.stage, { at: new Date().toISOString(), to });
+      const msg = await sendFeeReminder(app, schema, act.stage, { link, closeDate: closeDate(app.step2_at) });
+      await record(app.id, act.stage, { at: new Date().toISOString(), to: msg.to });
       out.sent++;
+      // On the HubSpot timelines. The personal link is a login, so it's
+      // replaced in the logged copy — anyone with HubSpot access would
+      // otherwise be able to open the application.
+      const scrub = (x) => String(x || "").split(link).join(`${siteUrl()}/`);
+      const lg = await logFamilyEmail(app, { ...msg, text: scrub(msg.text), html: scrub(msg.html.split(link.replace(/&/g, "&amp;")).join(`${siteUrl()}/`)) });
+      await record(app.id, act.stage, { at: new Date().toISOString(), to: msg.to, hubspot: lg });
     } catch (err) {
       log.error(`[reminders] ${app.id} stage ${act.stage}:`, err.message);
       await release(app.id, act.stage, err);

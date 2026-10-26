@@ -139,6 +139,25 @@ await t('a failed send is released and retried on the next run', async () => {
   assert.equal((await rem(id)).reminders.lastError, undefined);
 });
 
+await t('each reminder is logged on HubSpot — with the personal login link removed', async () => {
+  const { fakeUpstreams } = await import('./harness.mjs');
+  const up = fakeUpstreams();
+  process.env.HUBSPOT_TOKEN = 'x';
+  try {
+    const id = await insertApp('hs@x.org', 1.3);
+    await pool.query(`UPDATE applications SET hubspot_contact_id = 'C9', hubspot_deal_id = 'D9' WHERE id = $1`, [id]);
+    const out = await R.runReminders({ schema, now, log: { error() {} } });
+    assert.equal(out.sent, 1);
+    const e = up.crm.emails.at(-1);
+    assert.equal(e.properties.hs_email_subject, 'Your Pacific Discovery application is almost done');
+    assert.ok(!/token=/.test(e.properties.hs_email_html + e.properties.hs_email_text), 'no login token in HubSpot');
+    assert.match(e.properties.hs_email_html, /href="https:\/\/apply\.example\.org\/"/);
+    assert.deepEqual(e.associations.map((a) => [a.to.id, a.types[0].associationTypeId]), [['C9', 198], ['D9', 210]]);
+    assert.ok(mails.at(-1).text.includes('token='), 'the family still gets their personal link');
+    assert.equal((await rem(id)).reminders.sent['1'].hubspot.id, 'e1');
+  } finally { delete process.env.HUBSPOT_TOKEN; up.restore(); }
+});
+
 await t('switched off → the run does nothing', async () => {
   const off = structuredClone(schema); off.settings.feeReminders.enabled = false;
   await insertApp('off@x.org', 1.5);

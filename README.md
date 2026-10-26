@@ -312,3 +312,9 @@ Wording is edited in the dashboard (Fee, interview & text → *Email: applicatio
 Off until switched on in the dashboard (Fee, interview & text → Reminders, then Publish). The switch-on time is recorded and only applications completed after it are reminded. Needs pd-dashboard's `MIGRATION-reminders.sql`. A missed run sends only the latest due reminder; each send is claimed in the database first so overlapping runs can't double-send; a failed send is released and retried next hour (`reminders.lastError`). At most 60 emails per run.
 
 Tests: `node test/reminders.test.mjs` (needs `TEST_PG_URL`, included in `npm run test:flow`).
+
+## HubSpot activity
+
+Every email sent to a family (fee confirmation, the four fee reminders, and the later acceptance / payment emails) is logged as an outgoing email on the **student's and each parent's contact timeline and on the deal** (`_lib/email-log.mjs` → CRM Emails object, association types 198 contact / 210 deal). Reminder links are logins, so the logged copy has the personal link replaced with the plain site address.
+
+Logging needs the HubSpot private app to be allowed to create email engagements. If HubSpot refuses (403, missing scope), the email still goes; the application shows *Fee confirmation logged in HubSpot — needs a look* with HubSpot's message. Add the scope it names to the private app, then **Retry sync** — the log is written then, and the family is not emailed again. Admissions-only alerts (new applicant, interview needed, fee paid) are not logged on the family's timeline.

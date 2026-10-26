@@ -271,6 +271,17 @@ await t('fee paid: confirmation to student + parents with the terms; admissions 
   const alert = mails.filter((m) => /^Application fee paid/.test(m.subject));
   assert.equal(alert.length, 1);
   assert.equal(alert[0].to, 'admissions@pacificdiscovery.org');
+  // Logged on the student's + parent's HubSpot timelines and the deal
+  const logged = up.crm.emails.filter((e) => /^Application received/.test(e.properties.hs_email_subject));
+  assert.equal(logged.length, 1);
+  const parent = [...up.crm.contacts.values()].find((c) => c.properties.email === 'rosa@example.com');
+  const assocs = logged[0].associations.map((a) => [a.to.id, a.types[0].associationTypeId]);
+  assert.deepEqual(assocs.sort(), [[String(row.hubspot_contact_id), 198], [String(parent.id), 198], [String(row.hubspot_deal_id), 210]].sort());
+  assert.equal(logged[0].properties.hs_email_direction, 'EMAIL');
+  assert.deepEqual(JSON.parse(logged[0].properties.hs_email_headers).to.map((x) => x.email), ['maya@example.com', 'rosa@example.com']);
+  assert.match(logged[0].properties.hs_email_html, /Program Terms/);
+  const [row2] = (await pool.query('SELECT sync FROM applications WHERE id = $1', [appId])).rows;
+  assert.equal(row2.sync.feeEmailLog.ok, true);
 });
 
 await t('/api/terms: live version for the website (CORS), specific versions, 404 for unknown', async () => {
@@ -296,6 +307,23 @@ await t('webhook replay is idempotent (no second payment_N)', async () => {
   const bad = await webhook(new Request('https://apply.example.org/api/stripe-webhook', { method: 'POST', headers: { 'stripe-signature': `t=${ts},v1=deadbeef` }, body: payload }));
   assert.equal(bad.status, 400);
   assert.equal(mails.filter((m) => /^Application received/.test(m.subject)).length, 1, 'no second confirmation');
+});
+
+await t('HubSpot refusing the email log is shown, then logged on retry without resending', async () => {
+  const { syncApplication } = await import('../netlify/functions/_lib/applications.mjs');
+  const quiet = { error() {}, warn() {}, log() {} };
+  const before = mails.length; const logged = up.crm.emails.length;
+  await pool.query(`UPDATE applications SET sync = sync || '{"feeEmailLog":{"ok":false,"error":"403"}}'::jsonb WHERE id = $1`, [appId]);
+  up.crm.emailsForbidden = true;
+  await syncApplication(appId, { schema, log: quiet });
+  let [row] = (await pool.query('SELECT sync FROM applications WHERE id = $1', [appId])).rows;
+  assert.equal(row.sync.feeEmailLog.ok, false); assert.match(row.sync.feeEmailLog.error, /scopes/);
+  up.crm.emailsForbidden = false;
+  await syncApplication(appId, { schema, log: quiet });
+  [row] = (await pool.query('SELECT sync FROM applications WHERE id = $1', [appId])).rows;
+  assert.equal(row.sync.feeEmailLog.ok, true); assert.equal(row.sync.feeEmailLog.late, true);
+  assert.equal(up.crm.emails.length, logged + 1);
+  assert.equal(mails.length, before, 'the family is not emailed again');
 });
 
 await t('a resync of an application paid long ago never emails the family', async () => {

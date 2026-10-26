@@ -18,7 +18,8 @@ import * as HS from "./hubspot.mjs";
 import * as HSF from "./hsforms.mjs";
 import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
-import { alertOn, mailOn, sendStep1Alert, sendInterviewNeededAlert, sendFeeConfirmation, sendFeePaidAlert, familyRecipients } from "./notify.mjs";
+import { alertOn, mailOn, sendStep1Alert, sendInterviewNeededAlert, sendFeeConfirmation, sendFeePaidAlert, familyRecipients, feeConfirmationContent, applicantFrom } from "./notify.mjs";
+import { logFamilyEmail } from "./email-log.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
 import { emailTemplate } from "../../../public/terms-kit.mjs";
 
@@ -378,10 +379,22 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
     try {
       const v = app.payment?.termsVersion;
       const terms = await publishedTermsOrNull(v ? { version: v } : {});
-      const to = await sendFeeConfirmation(app, schema, terms);
-      await setSync(app.id, { feeEmail: ok({ to, termsVersion: terms?.version ?? null }), feeEmailError: undefined });
+      const msg = await sendFeeConfirmation(app, schema, terms);
+      await setSync(app.id, { feeEmail: ok({ to: msg.to, termsVersion: terms?.version ?? null }), feeEmailError: undefined });
       out.feeEmail = "ok";
+      // On the student's, parents' and deal's HubSpot timelines.
+      const lg = await logFamilyEmail(app, msg);
+      await setSync(app.id, { feeEmailLog: lg.error ? { ok: false, at: new Date().toISOString(), error: lg.error } : ok(lg) });
     } catch (err) { log.error("[sync feeEmail]", err.message); await setSync(app.id, { feeEmailError: fail(err) }); out.feeEmail = err.message; }
+  } else if (s.feeEmail?.ok && s.feeEmailLog?.ok === false) {
+    // The email went but HubSpot didn't take the log (e.g. a missing scope,
+    // since fixed). Log it now — never resend the email itself.
+    const v = s.feeEmail.termsVersion;
+    const terms = await publishedTermsOrNull(v ? { version: v } : {});
+    const c = feeConfirmationContent(app, schema, terms);
+    const lg = await logFamilyEmail(app, { to: s.feeEmail.to || familyRecipients(app), from: applicantFrom().from, subject: c.subject, text: c.text, html: c.html }, { at: s.feeEmail.at });
+    await setSync(app.id, { feeEmailLog: lg.error ? { ok: false, at: new Date().toISOString(), error: lg.error } : ok({ ...lg, late: true }) });
+    out.feeEmailLog = lg.error || "ok";
   }
   if (paidRecently && !s.feeAlert && alertOn()) {
     try {

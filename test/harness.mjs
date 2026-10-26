@@ -33,7 +33,7 @@ export function memoryStore() {
 export function fakeUpstreams({ pdOptions } = {}) {
   const calls = [];
   const crm = {
-    contacts: new Map(), deals: new Map(), assoc: new Map(), notes: [], seq: 100,
+    contacts: new Map(), deals: new Map(), assoc: new Map(), notes: [], emails: [], seq: 100,
     pipelines: [
       { id: '1', label: 'PD Applications', stages: [{ id: 'a1', label: 'Application Received', displayOrder: 0 }, { id: 'a2', label: 'Application Complete', displayOrder: 1 }] },
       { id: '694619955', label: 'Summer Program', stages: [{ id: 's9', label: 'Application Fee Received', displayOrder: 1 }] },
@@ -117,6 +117,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
       }
       if (p === '/crm/v3/objects/deals/batch/read') return J({ results: b.inputs.map((i) => crm.deals.get(i.id)).filter(Boolean) });
       if (p === '/crm/v3/objects/notes') { crm.notes.push(b); return J({ id: 'n1' }); }
+      if (p === '/crm/v3/objects/emails') { if (crm.emailsForbidden) return J({ message: 'This app hasn\'t been granted all required scopes to make this call.', category: 'MISSING_SCOPES' }, 403); crm.emails.push(b); return J({ id: `e${crm.emails.length}` }); }
       if (p === '/crm/v4/associations/contacts/contacts/labels') return J({ results: [{ category: 'USER_DEFINED', typeId: 51, label: 'Parent' }, { category: 'USER_DEFINED', typeId: 52, label: 'Child' }] });
       if (p === '/crm/v4/associations/deals/contacts/labels') return J({ results: [{ category: 'HUBSPOT_DEFINED', typeId: 3, label: null }, { category: 'USER_DEFINED', typeId: 61, label: 'Student' }, { category: 'USER_DEFINED', typeId: 62, label: 'Parent' }] });
       // Paired labels like the real portal: the contact side reads "Program",
