@@ -8,13 +8,14 @@
 //   POST /api/service/resync   { id }         re-run Jotform/HubSpot sync (dashboard)
 //   POST /api/service/decision { id, outcome: "accepted"|"declined", by, message?, refund? }
 //                                             admissions decision (dashboard) — see _lib/decisions.mjs
+//   POST /api/service/extend-hold { id, days?, by }  hold an accepted place longer
 
 import { db, publishedSchema } from "./_lib/db.mjs";
 import { serviceOk, json, errorResponse, fileUrl } from "./_lib/http.mjs";
 import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
-import { decide } from "./_lib/decisions.mjs";
+import { decide, extendHold } from "./_lib/decisions.mjs";
 
 export const config = { path: ["/api/service/*"] };
 
@@ -69,6 +70,10 @@ export default async (req) => {
         sync = sync - 'hsError' - 'hsPaidError' - 'hsInterviewError' WHERE id = ${id}`;
       const result = await A.syncApplication(id, { schema });
       return json({ ok: true, result, app: await A.byId(id) });
+    }
+    if (req.method === "POST" && route === "extend-hold") {
+      const b = await req.json();
+      return json({ ok: true, decision: await extendHold(String(b.id || ""), { days: b.days, by: b.by }) });
     }
     if (req.method === "POST" && route === "decision") {
       const b = await req.json();

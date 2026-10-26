@@ -27,7 +27,7 @@ async function stripe(path, { method = "GET", params, idempotencyKey } = {}) {
   return data;
 }
 
-async function customerFor(email, name) {
+export async function customerFor(email, name) {
   const found = await stripe(`/customers?email=${encodeURIComponent(email)}&limit=1`);
   if (found?.data?.[0]?.id) return found.data[0].id;
   const p = new URLSearchParams();
@@ -114,4 +114,47 @@ export function verifyWebhook(rawBody, header, whsec = process.env.STRIPE_WEBHOO
   if (Math.abs(now / 1000 - t) > 300) return false;
   const expected = crypto.createHmac("sha256", whsec).update(`${t}.${rawBody}`).digest("hex");
   return sigs.some((s) => s.length === expected.length && crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected)));
+}
+
+/** Stripe payment_method_types for a method choice. ACH = US bank account. */
+export function methodTypes(method) {
+  if (method === "ach") return (process.env.STRIPE_DIRECT_DEBIT_METHODS || "us_bank_account").split(",").map((x) => x.trim()).filter(Boolean);
+  return ["card"];
+}
+
+/**
+ * Checkout for the deposit (and, depending on the plan, the first instalment
+ * or the whole balance). `save` keeps the card / bank account on the Stripe
+ * customer for the automatic instalments.
+ */
+export async function createDepositCheckout({ app, lines, currency, method, save, successUrl, cancelUrl, metadata, description }) {
+  const customer = await customerFor(app.email, [app.first_name, app.last_name].filter(Boolean).join(" "));
+  const p = new URLSearchParams();
+  p.append("mode", "payment");
+  for (const t of methodTypes(method)) p.append("payment_method_types[]", t);
+  p.append("customer", customer);
+  p.append("customer_update[name]", "auto");
+  p.append("customer_update[address]", "auto");
+  p.append("client_reference_id", app.id);
+  lines.filter(([, amount]) => amount > 0).forEach(([name, amount], i) => {
+    p.append(`line_items[${i}][quantity]`, "1");
+    p.append(`line_items[${i}][price_data][currency]`, currency);
+    p.append(`line_items[${i}][price_data][unit_amount]`, String(Math.round(amount * 100)));
+    p.append(`line_items[${i}][price_data][product_data][name]`, name);
+  });
+  if (save) p.append("payment_intent_data[setup_future_usage]", "off_session");
+  if (method === "ach") p.append("payment_method_options[us_bank_account][verification_method]", "automatic");
+  p.append("success_url", successUrl);
+  p.append("cancel_url", cancelUrl);
+  const meta = { source: "pd-apply", application_id: app.id, contact_email: app.email, ...metadata };
+  for (const [k, v] of Object.entries(meta)) {
+    p.append(`metadata[${k}]`, String(v ?? "").slice(0, 500));
+    p.append(`payment_intent_data[metadata][${k}]`, String(v ?? "").slice(0, 500));
+  }
+  if (description) p.append("payment_intent_data[description]", description.slice(0, 300));
+  return stripe("/checkout/sessions", { method: "POST", params: p });
+}
+
+export async function getPaymentIntent(id) {
+  return stripe(`/payment_intents/${encodeURIComponent(id)}`);
 }

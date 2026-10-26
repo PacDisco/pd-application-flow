@@ -49,6 +49,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
       { id: 'P2', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2026-09-02' } },
       { id: 'P3', properties: { pacific_discovery_program: 'Bali Summer Program', program_start_date: '2027-06-20' } },
       { id: 'P4', properties: { pacific_discovery_program: 'Costa Rica Mini Semester', program_start_date: '2027-09-10' } },
+      { id: 'P5', properties: { pacific_discovery_program: 'South America Semester', program_start_date: '2027-09-09', program_end_date: '2027-12-10' } },
     ],
     pdOptions: pdOptions || [{ value: 'Bali Summer Program', label: 'Bali Summer Program' }, { value: 'South America Semester', label: 'South America Semester' }],
   };
@@ -154,6 +155,10 @@ export function fakeUpstreams({ pdOptions } = {}) {
       if ((m = /^\/crm\/v4\/objects\/contacts\/([^/]+)\/associations\/2-58411705$/.exec(p)) && method === 'GET') return programRows('contact', m[1]);
       if ((m = /^\/crm\/v4\/objects\/2-58411705\/([^/]+)\/associations\/contacts$/.exec(p)) && method === 'GET') return programRows('program', m[1]);
       if (p === '/crm/v3/objects/2-58411705') return J({ results: crm.programs });
+      if ((m = /^\/crm\/v3\/objects\/2-58411705\/([^/]+)$/.exec(p)) && method === 'GET') {
+        const rec = crm.programs.find((r) => r.id === m[1]);
+        return rec ? J(rec) : J({ message: 'not found' }, 404);
+      }
       if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/(default\/)?([^/]+)\/([^/]+)$/.exec(p)) && method === 'PUT') {
         const [, from, fromId, dflt, to, toId] = m;
         const types = dflt ? [null] : b.map((t) => t.associationTypeId);
@@ -189,7 +194,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
         const amount = [0, 1].reduce((acc, i) => acc + Number(f.get(`line_items[${i}][price_data][unit_amount]`) || 0), 0);
         const meta = {};
         for (const [k, v] of f) { const mm = /^metadata\[(\w+)\]$/.exec(k); if (mm) meta[mm[1]] = v; }
-        const s = { id, url: `https://checkout.stripe.com/c/pay/${id}`, client_reference_id: f.get('client_reference_id'), amount_total: amount, currency: 'usd', metadata: meta, payment_status: 'unpaid', payment_intent: `pi_${id}`, created: Math.floor(Date.now() / 1000), success_url: f.get('success_url'), form: f };
+        const s = { id, url: `https://checkout.stripe.com/c/pay/${id}`, client_reference_id: f.get('client_reference_id'), amount_total: amount, currency: 'usd', metadata: meta, payment_status: 'unpaid', status: 'open', customer: f.get('customer'), payment_intent: `pi_${id}`, created: Math.floor(Date.now() / 1000), success_url: f.get('success_url'), form: f };
         stripe.sessions.set(id, s);
         return J(s);
       }
@@ -205,6 +210,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
         return J(refund);
       }
       let m;
+      if ((m = /^\/v1\/payment_intents\/(.+)$/.exec(p))) return J({ id: m[1], object: 'payment_intent', payment_method: `pm_${m[1]}` });
       if ((m = /^\/v1\/checkout\/sessions\/(.+)$/.exec(p))) return J(stripe.sessions.get(m[1]) || {}, stripe.sessions.has(m[1]) ? 200 : 404);
       return J({ error: { message: 'fake stripe unhandled' } }, 404);
     }
@@ -222,6 +228,7 @@ export async function startServer(port = 8899) {
   const service = (await import('../netlify/functions/service.mjs')).default;
   const file = (await import('../netlify/functions/file.mjs')).default;
   const webhook = (await import('../netlify/functions/stripe-webhook.mjs')).default;
+  const accept = (await import('../netlify/functions/accept.mjs')).default;
   const trackingConfig = (await import('../netlify/functions/tracking-config.mjs')).default;
   const root = new URL('../public/', import.meta.url).pathname;
   const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -236,6 +243,7 @@ export async function startServer(port = 8899) {
     else if (url.pathname.startsWith('/api/quiz/')) out = await quiz(r, { ip: '127.0.0.1' });
     else if (url.pathname.startsWith('/api/service/')) out = await service(r);
     else if (url.pathname.startsWith('/api/file/')) out = await file(r, { params: { id: url.pathname.split('/').pop() } });
+    else if (url.pathname.startsWith('/api/accept/')) out = await accept(r);
     else if (url.pathname === '/api/stripe-webhook') out = await webhook(r);
     else if (url.pathname === '/tracking-config.js') out = await trackingConfig(r);
     if (out) {
@@ -243,7 +251,7 @@ export async function startServer(port = 8899) {
       res.end(Buffer.from(await out.arrayBuffer()));
       return;
     }
-    let p = join(root, url.pathname === '/' ? 'index.html' : url.pathname === '/quiz' ? 'quiz.html' : url.pathname);
+    let p = join(root, url.pathname === '/' ? 'index.html' : url.pathname === '/quiz' ? 'quiz.html' : url.pathname === '/accept' ? 'accept.html' : url.pathname);
     if (!existsSync(p)) { res.writeHead(404); res.end('not found'); return; }
     res.writeHead(200, { 'Content-Type': types[extname(p)] || 'application/octet-stream' });
     res.end(readFileSync(p));

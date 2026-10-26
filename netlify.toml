@@ -82,3 +82,13 @@
   [headers.values]
     Cache-Control = "public, max-age=300"
     Access-Control-Allow-Origin = "*"
+
+[[redirects]]
+  from = "/accept"
+  to = "/accept.html"
+  status = 200
+
+[[headers]]
+  for = "/accept.js"
+  [headers.values]
+    Cache-Control = "no-cache"

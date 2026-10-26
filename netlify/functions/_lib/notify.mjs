@@ -11,6 +11,7 @@
 
 import nodemailer from "nodemailer";
 import * as K from "../../../public/form-kit.mjs";
+import * as P from "../../../public/plans-kit.mjs";
 
 const HUBSPOT_PORTAL_ID = process.env.HUBSPOT_PORTAL_ID || "3855728";
 
@@ -348,4 +349,109 @@ export async function sendDeclined(app, schema, opts) {
   const { from, replyTo } = applicantFrom();
   await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
   return { to, from, subject, text, html };
+}
+
+// ── acceptance + enrolment ─────────────────────────────────────────────────
+const longDate = (d) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? `${d}T12:00:00Z` : d)
+  .toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+const shortDate = (d) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? `${d}T12:00:00Z` : d)
+  .toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+/** "Congratulations — you're accepted" with the personal confirm link. Pure (tested). */
+export function acceptedContent(app, schema, { offer, link, terms = null, message = "", now = new Date() } = {}) {
+  const tpl = TK.emailTemplate(schema, "accepted");
+  // What they'll be offered on the page depends on how close the start is.
+  let howToPay = `You'll pay your ${usd(offer?.deposit ?? 2250)} deposit and choose how to pay the rest of your tuition.`;
+  if (offer?.start && offer?.tuition) {
+    const o = P.paymentOptions({ tuition: offer.tuition, paid: offer.paid ?? 250, deposit: offer.deposit, start: offer.start, today: P.iso(now) });
+    const keys = o.options.map((x) => x.key);
+    if (keys.includes("monthly")) howToPay = `You'll pay your ${usd(offer.deposit)} deposit and choose how to pay the rest of your tuition — monthly, in two instalments, or in full.`;
+    else if (keys.includes("two")) howToPay = `You'll choose to pay your tuition in two instalments or in full.`;
+    else howToPay = `As your program starts in less than ${P.TWO_MIN_DAYS} days, the remaining tuition of ${usd(offer.tuition - (offer.paid ?? 250))} is due when you confirm.`;
+  }
+  const vars = {
+    firstName: app.answers?.preferredName || app.first_name || "there",
+    program: app.program || "your Pacific Discovery program",
+    term: app.term || "",
+    startDate: offer?.start ? longDate(offer.start) : "",
+    // A moment in time: shown as the date in admissions' time zone.
+    holdUntil: offer?.holdUntil ? new Date(offer.holdUntil).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" }) : "",
+    deposit: usd(offer?.deposit ?? 2250),
+    tuition: usd(offer?.tuition ?? 0),
+    howToPay,
+    message: String(message || "").trim(),
+    link: link || "",
+  };
+  const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "").replace(/, starting \./, ".");
+  const subject = TK.fillTemplate(tpl.subject, vars);
+  const advisor = TK.advisorBlock(schema);
+  return { subject, text: familyEmailText(body, terms, advisor), html: familyEmailHtml(body, terms, advisor), enabled: tpl.enabled };
+}
+
+export async function sendAccepted(app, schema, opts) {
+  const to = familyRecipients(app);
+  if (!to.length) throw new Error("No valid recipient email");
+  const { subject, text, html } = acceptedContent(app, schema, opts);
+  const { from, replyTo } = applicantFrom();
+  await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
+  return { to, from, subject, text, html };
+}
+
+export const PLAN_NAMES = { monthly: "Monthly payments", two: "Two instalments", full: "Paid in full", later: "Deposit now, balance later" };
+
+/** "Your place is confirmed" — plan, schedule, portal. Pure (tested). */
+export function enrolledContent(app, schema, { enrolment, terms = null } = {}) {
+  const tpl = TK.emailTemplate(schema, "enrolled");
+  const e = enrolment || {};
+  const method = e.choice?.method === "ach" ? "bank account" : "card";
+  const later = (e.schedule || []).filter((p) => p.kind !== "deposit");
+  const schedule = later.length
+    ? later.map((p) => `- ${shortDate(p.due)} — ${usd(p.amount)}${p.manual ? " (due by this date)" : ""}`).join("\n")
+    : "- Nothing more to pay — your tuition is paid in full. Thank you!";
+  const auto = later.filter((p) => !p.manual);
+  const manual = later.filter((p) => p.manual);
+  const notes = [];
+  const rate = Number(e.lastPending?.rate ?? K.surchargeRates(schema)[e.choice?.method === "ach" ? "ach" : "card"]) || 0;
+  const feeNote = rate > 0 ? ` A ${(rate * 100).toFixed(1).replace(/\.0$/, "")}% processing fee is added to each ${method} payment.` : "";
+  if (auto.length) notes.push(`We'll charge ${auto.length === 1 ? "this" : "these"} automatically to the ${method} you used today and email you 3 days before each payment.${feeNote}`);
+  if (manual.length) notes.push(`Please pay the remaining ${usd(manual[0].amount)} by ${shortDate(manual[0].due)} — you can pay any time before then from the student portal.`);
+  const vars = {
+    firstName: app.answers?.preferredName || app.first_name || "there",
+    program: app.program || "your Pacific Discovery program",
+    term: app.term || "",
+    paidToday: usd(e.deposit?.total ?? e.deposit?.amount ?? 0),
+    planName: PLAN_NAMES[e.choice?.plan] || "",
+    schedule,
+    scheduleNote: notes.join(" "),
+    email: app.email,
+    portalUrl: (process.env.PORTAL_BASE_URL || "https://portal.pacificdiscovery.org").replace(/\/+$/, "") + "/login.html",
+  };
+  const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "");
+  const subject = TK.fillTemplate(tpl.subject, vars);
+  const advisor = TK.advisorBlock(schema);
+  return { subject, text: familyEmailText(body, terms, advisor), html: familyEmailHtml(body, terms, advisor), enabled: tpl.enabled };
+}
+
+export async function sendEnrolled(app, schema, opts) {
+  const to = familyRecipients(app);
+  if (!to.length) throw new Error("No valid recipient email");
+  const { subject, text, html } = enrolledContent(app, schema, opts);
+  const { from, replyTo } = applicantFrom();
+  await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
+  return { to, from, subject, text, html };
+}
+
+/** Admissions: deposit paid. */
+export async function sendDepositAlert(app, enrolment) {
+  const to = alertRecipients();
+  if (!to.length) return [];
+  const name = `${app.first_name || ""} ${app.last_name || ""}`.trim() || app.email;
+  const plan = PLAN_NAMES[enrolment?.choice?.plan] || "";
+  const subject = `Deposit paid: ${name}${app.program ? ` — ${app.program}` : ""}${app.term ? ` (${app.term})` : ""}`;
+  const text = `${name} has paid ${usd(enrolment?.deposit?.total ?? 0)} and confirmed their place. Plan: ${plan}.`;
+  await transport().sendMail({
+    from: `"${process.env.SMTP_FROM_NAME || "Pacific Discovery Applications"}" <${process.env.SMTP_USER}>`,
+    to: to.join(", "), replyTo: app.email, subject, text, html: `<p style="font-family:Arial,sans-serif;font-size:14px">${esc(text)}</p>`,
+  });
+  return to;
 }

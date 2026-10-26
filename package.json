@@ -8,9 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/form-kit.test.mjs && node test/terms-kit.test.mjs && node test/routing.test.mjs && node test/tracking.test.mjs",
-    "test:flow": "node test/flow.test.mjs && node test/quiz.test.mjs && node test/reminders.test.mjs && node test/decisions.test.mjs",
-    "test:ui": "node test/ui.smoke.mjs"
+    "test": "node test/plans-kit.test.mjs && node test/form-kit.test.mjs && node test/terms-kit.test.mjs && node test/routing.test.mjs && node test/tracking.test.mjs",
+    "test:flow": "node test/flow.test.mjs && node test/quiz.test.mjs && node test/reminders.test.mjs && node test/decisions.test.mjs && node test/enrol.test.mjs",
+    "test:ui": "node test/ui.smoke.mjs && node test/accept.smoke.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

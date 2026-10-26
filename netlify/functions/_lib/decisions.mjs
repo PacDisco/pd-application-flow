@@ -22,7 +22,9 @@ import * as A from "./applications.mjs";
 import * as HS from "./hubspot.mjs";
 import * as R from "./routing.mjs";
 import { refundPayment } from "./stripe.mjs";
-import { mailOn, sendDeclined } from "./notify.mjs";
+import { mailOn, sendDeclined, sendAccepted } from "./notify.mjs";
+import { makeOffer, patchEnrolment, acceptLink } from "./enrol.mjs";
+import { publishedTermsOrNull } from "./terms.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { holdDays, emailTemplate } from "../../../public/terms-kit.mjs";
 
@@ -98,7 +100,9 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
   };
 
   if (outcome === "accepted") {
-    decision.holdUntil = new Date(now.getTime() + holdDays(schema) * 864e5).toISOString();
+    // The offer (price + start date) is fixed now; no start date → refused.
+    decision.offer = await makeOffer(app, schema, { holdDays: holdDays(schema), now });
+    decision.holdUntil = decision.offer.holdUntil;
   } else {
     // Refund first. Default: refund, unless they were accepted (then the fee
     // is non-refundable under the terms) — admissions can override either way.
@@ -115,6 +119,23 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
   await writeDecision(app.id, decision);
 
   // ── after the decision is stored: email, HubSpot (best-effort, recorded) ──
+  if (outcome === "accepted") {
+    await patchEnrolment(app.id, { offer: decision.offer });
+    if (mailOn() && emailTemplate(schema, "accepted").enabled) {
+      try {
+        const token = await A.addLinkToken(app.id);
+        const link = acceptLink(token);
+        const terms = await publishedTermsOrNull();
+        const msg = await sendAccepted(app, schema, { offer: decision.offer, link, terms, message: decision.message });
+        // The logged copy must not carry the personal link (it signs them in).
+        const scrub = (x) => String(x || "").split(link).join(acceptLink("")).split(link.replace(/&/g, "&amp;")).join(acceptLink(""));
+        decision.email = { to: msg.to, at: new Date().toISOString(), hubspot: await logFamilyEmail(app, { ...msg, text: scrub(msg.text), html: scrub(msg.html) }) };
+      } catch (err) {
+        log.error?.("[decision email]", err.message);
+        decision.email = { error: String(err.message).slice(0, 300), at: new Date().toISOString() };
+      }
+    }
+  }
   if (outcome === "declined" && mailOn() && emailTemplate(schema, "declined").enabled) {
     try {
       const msg = await sendDeclined(app, schema, { message: note, refund: decision.refund });
@@ -128,7 +149,7 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
     try {
       const moved = await moveDeal(app, outcome);
       const lines = outcome === "accepted"
-        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. Place held until ${esc(new Date(decision.holdUntil).toDateString())} for the $2,250 deposit.</p>`]
+        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. Place held until ${esc(new Date(decision.holdUntil).toDateString())} for the $2,250 deposit. Tuition $${Number(decision.offer.tuition).toLocaleString("en-US")}, starts ${esc(decision.offer.start)}.${decision.email?.to ? " Acceptance email sent." : ""}</p>`]
         : [`<p><strong>Not accepted</strong> — decided by ${esc(decision.by)}.</p>`,
           decision.refund ? `<p>Application fee refunded: $${(decision.refund.amount / 100).toFixed(2)} (Stripe ${esc(decision.refund.id)}).</p>` : "<p>Application fee not refunded.</p>"];
       if (note) lines.push(`<p>Message to the family: ${esc(note)}</p>`);
@@ -141,4 +162,20 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
   }
   await writeDecision(app.id, decision);
   return decision;
+}
+
+/** Admissions extends the hold on an accepted applicant's place (default 7 more days from now). */
+export async function extendHold(appId, { days = 7, by = "admissions" } = {}, { now = new Date() } = {}) {
+  const app = await A.byId(appId);
+  if (!app) throw bad("Application not found.", 404);
+  const d = await readDecision(app.id);
+  if (d?.outcome !== "accepted") throw bad("Only an accepted application has a hold to extend.", 409);
+  const n = Math.max(1, Math.min(60, Math.round(Number(days) || 7)));
+  // n days from today — never shorter than the hold they already have.
+  const current = Date.parse(d.holdUntil || "") || 0;
+  const holdUntil = new Date(Math.max(current, now.getTime() + n * 864e5)).toISOString();
+  const next = { ...d, holdUntil, offer: d.offer ? { ...d.offer, holdUntil } : d.offer, extended: [...(d.extended || []), { at: now.toISOString(), by, holdUntil }] };
+  await writeDecision(app.id, next);
+  if (d.offer) await patchEnrolment(app.id, { offer: next.offer });
+  return next;
 }

@@ -72,7 +72,7 @@ The stage is the pipeline's "Application Fee Received" (or "…Paid") stage. `pd
    | `HUBSPOT_APPLICATION_PIPELINE` | optional; the application pipeline's name or ID, default `PD Applications` |
 
 4. **Domain:** add `apply.pacificdiscovery.org` to the site.
-5. **Stripe webhook:** Developers → Webhooks → Add endpoint `https://apply.pacificdiscovery.org/api/stripe-webhook`, events `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Copy the signing secret into `STRIPE_WEBHOOK_SECRET`. Other Stripe sessions (the student portal's) are ignored.
+5. **Stripe webhook:** Developers → Webhooks → Add endpoint `https://apply.pacificdiscovery.org/api/stripe-webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded` and `checkout.session.async_payment_failed` (bank deposits that bounce). Copy the signing secret into `STRIPE_WEBHOOK_SECRET`. Other Stripe sessions (the student portal's) are ignored.
 6. **Dashboard:** deploy pd-dashboard, set `APPLY_SITE_URL` + `APPLY_SERVICE_KEY` there, open **Apply Form**. The form seeds itself from the live Jotform forms. Check the Programs tab (Japan Summer Program has no price on the current Jotform, and PD Program values need picking), then **Publish**.
 7. **Portals:** set `APPLY_SERVICE_URL=https://apply.pacificdiscovery.org` and `APPLY_SERVICE_KEY` on the student and instructor portal sites, then deploy them.
 8. **Website:** point the "Apply" buttons at `https://apply.pacificdiscovery.org`. UTM/gclid/fbclid parameters on that link are captured. To embed it in a page instead:
@@ -280,9 +280,10 @@ npm install
 npm test                           # engine + HubSpot routing (no services needed)
 TEST_PG_URL=postgres://… npm run test:flow   # every step through the real handlers, against a local Postgres
 TEST_PG_URL=postgres://… npm run test:ui     # the whole flow in Chromium, desktop + mobile
+TEST_PG_URL=postgres://… node test/accept.smoke.mjs   # the acceptance page in Chromium
 ```
 
-The flow and UI tests run the real functions against a local Postgres (with `MIGRATION-apply.sql` applied). HubSpot, Jotform and Stripe are faked in `test/harness.mjs`.
+The flow and UI tests run the real functions against a local Postgres (with pd-dashboard's `MIGRATION-apply.sql`, `-reminders`, `-decisions` and `-enrolment` applied). HubSpot, Jotform and Stripe are faked in `test/harness.mjs`.
 
 ## Program Terms & Conditions
 
@@ -327,9 +328,21 @@ Families can also book from the "Book your interview" button in their emails, a 
 
 Made in the dashboard (Applications → open an applicant → **Accept** / **Decline**; roles in the dashboard's `APPLY_DECISION_ROLES`, default admin + admissions) and carried out here through `POST /api/service/decision` (`_lib/decisions.mjs`). Needs pd-dashboard's `MIGRATION-decisions.sql`.
 
-- **Accept** (fee must be paid): place held for 7 days (`settings.acceptance.holdDays`), HubSpot deal → "Interview Complete" (your pipelines have no "Accepted" stage; the deposit moves it on to "Deposit Paid/Customer"), note on the timeline. *The acceptance email and deposit page come with the payment-plan release.*
+- **Accept** (fee must be paid; the program's HubSpot record must have a *Program Start Date*): the offer is fixed — tuition (deal amount, else the price in Programs & dates), start date, $2,250 deposit. Place held for 7 days (`settings.acceptance.holdDays`; admissions can **Extend hold**), HubSpot deal → "Interview Complete", note on the timeline. The student and parents get the editable *accepted* email with a personal **Confirm my place** link (logged in HubSpot with the link removed).
 - **Decline**: refunds the application fee in full through Stripe first — the default unless they had been accepted, and admissions can untick it. If Stripe refuses, nothing else happens. Then the student and parents get the editable "not accepted" email (logged in HubSpot), the deal moves to "Closed Lost", and a note records the refund. Reminders stop. Declines are final from the dashboard.
 - One decision at a time per application, so a double click can't refund or email twice.
+
+## Acceptance page and deposit (`/accept`)
+
+The personal link opens `public/accept.html`. Needs pd-dashboard's `MIGRATION-enrolment.sql` (`applications.enrolment`).
+
+- Options come from `public/plans-kit.mjs` (pure, tested): more than 90 days to the start → **monthly** (highlighted), **two instalments**, **pay in full**, and — quietly, as a text link — **deposit now, balance by 90 days before the start**; 75–90 days → two instalments (half with the deposit) or in full; under 75 days → in full. Instalments always finish 60 days before the start.
+- Card or US bank account; the surcharge for each is set in the dashboard (Fee, interview & text) and added to every payment. They must tick the Program Terms & Conditions; the version is recorded.
+- Today's payment goes through Stripe Checkout. For plans with instalments the card / bank account is saved (`setup_future_usage=off_session`) for automatic charges.
+- Paid (return page or webhook, whichever is first — recorded once): schedule stored, deal → **Deposit Paid/Customer**, `payment_N` filled, note with the plan, the editable *place confirmed* email to student + parents (logged in HubSpot) with the schedule and the student-portal link, and an admissions alert. A bank payment shows as *clearing* and is confirmed when Stripe says the money arrived; if it bounces, the page offers the payment again and a HubSpot note is added.
+- After the hold passes the page says so and won't take payment until admissions extends it. The link itself never expires.
+
+**Not in this release (4b — must be live before the first instalment is due, about a month after the first deposit):** the daily job that charges the saved card / bank account, the 3-day notice emails, retries and the admissions hand-off on a failed payment, deposit-unpaid reminders, and withdrawals (→ *Cancelled*, keep what's been paid).
 
 ### HubSpot stages (PD program pipelines)
 

@@ -3,7 +3,8 @@
 //
 // Stripe dashboard → Developers → Webhooks → Add endpoint:
 //   URL     https://apply.pacificdiscovery.org/api/stripe-webhook
-//   Events  checkout.session.completed, checkout.session.async_payment_succeeded
+//   Events  checkout.session.completed, checkout.session.async_payment_succeeded,
+//           checkout.session.async_payment_failed (bank payments that bounce)
 // Copy the signing secret into STRIPE_WEBHOOK_SECRET.
 //
 // Sessions that aren't from pd-apply (the student portal uses the same Stripe
@@ -14,6 +15,7 @@ import { json } from "./_lib/http.mjs";
 import { publishedSchema } from "./_lib/db.mjs";
 import * as A from "./_lib/applications.mjs";
 import { recordPayment } from "./apply.mjs";
+import * as E from "./_lib/enrol.mjs";
 
 export const config = { path: "/api/stripe-webhook" };
 
@@ -23,9 +25,19 @@ export default async (req) => {
   if (!verifyWebhook(raw, req.headers.get("stripe-signature"))) return json({ error: "Bad signature" }, 400);
   let event;
   try { event = JSON.parse(raw); } catch { return json({ error: "Bad JSON" }, 400); }
-  if (!["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) return json({ ignored: event.type });
+  if (!["checkout.session.completed", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed"].includes(event.type)) return json({ ignored: event.type });
   const session = event.data?.object || {};
   if (session.metadata?.source !== "pd-apply" || !session.client_reference_id) return json({ ignored: "not pd-apply" });
+  // Deposit / tuition from the acceptance page (stage 4).
+  if (session.metadata?.payment_kind === "deposit") {
+    const { schema } = await publishedSchema();
+    if (event.type === "checkout.session.async_payment_failed") {
+      await E.depositFailed(session, schema);
+      return json({ ok: true, failed: true });
+    }
+    const r = await E.recordDeposit(session, schema);
+    return json({ ok: true, first: !!r.first });
+  }
   if (session.payment_status !== "paid") return json({ ignored: "not paid yet" });
   const app = await A.byId(session.client_reference_id);
   if (!app) return json({ ignored: "unknown application" });
