@@ -168,10 +168,84 @@ export const DEFAULT_EMAILS = {
   },
 };
 
+// Application fee not paid: sent 1, 4, 10 and 21 days after the full
+// application is in (see netlify/functions/_lib/reminders.mjs). {link} is a
+// personal "continue your application" link; {nextStep} says what's left.
+const SIGN_OFF = ['', 'Questions? Just reply to this email.', '', 'Pacific Discovery Admissions'];
+DEFAULT_EMAILS.feeReminder1 = {
+  subject: 'Your Pacific Discovery application is almost done',
+  body: [
+    'Hi {firstName},',
+    '',
+    'Thanks for completing your application for **{program}** ({term}). There\'s one step left: {nextStep}',
+    '',
+    '[Finish my application]({link})',
+    '',
+    'Your {fee} application fee counts toward your tuition, and it\'s refunded in full if your application isn\'t accepted.',
+    ...SIGN_OFF,
+  ].join('\n'),
+};
+DEFAULT_EMAILS.feeReminder2 = {
+  subject: 'Still thinking about {program}?',
+  body: [
+    'Hi {firstName},',
+    '',
+    'Your application for **{program}** ({term}) is waiting for you. To finish it: {nextStep}',
+    '',
+    '[Finish my application]({link})',
+    '',
+    'Places on each program are limited, and we review applications in the order we receive them.',
+    '',
+    'If anything is holding you back — dates, cost, or questions about the program — reply to this email and we\'ll help.',
+    '',
+    'Pacific Discovery Admissions',
+  ].join('\n'),
+};
+DEFAULT_EMAILS.feeReminder3 = {
+  subject: 'Checking in about your application',
+  body: [
+    'Hi {firstName},',
+    '',
+    'I wanted to check in personally about your application for **{program}** ({term}). We\'d love to see it through, and it only takes a few minutes to finish: {nextStep}',
+    '',
+    '[Finish my application]({link})',
+    '',
+    'If you\'d like to talk anything through first, just reply and we\'ll set up a time to chat.',
+    '',
+    'Pacific Discovery Admissions',
+  ].join('\n'),
+};
+DEFAULT_EMAILS.feeReminder4 = {
+  subject: 'Should we keep your application open?',
+  body: [
+    'Hi {firstName},',
+    '',
+    'We haven\'t received the application fee for your **{program}** ({term}) application yet, so we\'ll close your application on {closeDate} unless we hear from you.',
+    '',
+    'If you\'d still like to join us, you can finish here:',
+    '',
+    '[Finish my application]({link})',
+    '',
+    'If your plans have changed, no problem at all — reply and let us know, and we\'ll stop these reminders.',
+    '',
+    'Pacific Discovery Admissions',
+  ].join('\n'),
+};
+
 /** The placeholders each message understands, for the dashboard help text. */
+const REMINDER_PLACEHOLDERS = ['firstName', 'program', 'term', 'fee', 'nextStep', 'link', 'closeDate'];
 export const EMAIL_PLACEHOLDERS = {
   feeConfirmation: ['firstName', 'studentName', 'program', 'term', 'fee', 'total', 'date', 'reference', 'interview', 'termsUrl'],
+  feeReminder1: REMINDER_PLACEHOLDERS,
+  feeReminder2: REMINDER_PLACEHOLDERS,
+  feeReminder3: REMINDER_PLACEHOLDERS,
+  feeReminder4: REMINDER_PLACEHOLDERS,
 };
+
+/** Days after the full application is in. Index n → template feeReminder{n+1}. */
+export const FEE_REMINDER_DAYS = [1, 4, 10, 21];
+/** Days after the full application when an unpaid application is marked closed. */
+export const FEE_CLOSE_DAYS = 28;
 
 export function emailTemplate(schema, key) {
   const d = DEFAULT_EMAILS[key] || { subject: '', body: '' };

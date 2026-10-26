@@ -26,14 +26,34 @@ export const mirrorOn = () => flag("JOTFORM_MIRROR", true);
 export const hubspotSyncOn = () => flag("HUBSPOT_SYNC", true);
 export const paymentSyncOn = () => flag("HUBSPOT_PAYMENT_SYNC", true);
 
-const COLS = `id, email, first_name, last_name, program, term, season, travel_year, program_type, deal_amount, status,
+export const COLS = `id, email, first_name, last_name, program, term, season, travel_year, program_type, deal_amount, status,
   answers, form_rev, jf_step1, jf_step2, step1_at, step2_at, interview_at, interview, paid_at, payment,
   hubspot_contact_id, hubspot_deal_id, jotform_step1_id, jotform_step2_id, sync, attribution, ip, user_agent, created_at, updated_at`;
 
 export async function byToken(token) {
   if (!token || typeof token !== "string" || token.length < 20) return null;
-  const rows = await db().query(`SELECT ${COLS} FROM applications WHERE token_hash = $1`, [hashToken(token)]);
-  return rows[0] || null;
+  const h = hashToken(token);
+  const rows = await db().query(`SELECT ${COLS} FROM applications WHERE token_hash = $1`, [h]);
+  if (rows[0]) return rows[0];
+  // "Continue your application" links from reminder emails carry their own
+  // token (MIGRATION-reminders.sql). Before that migration the column doesn't
+  // exist — then there are no such links, so not finding one is the answer.
+  try {
+    const more = await db().query(`SELECT ${COLS} FROM applications WHERE $1 = ANY(link_token_hashes) LIMIT 1`, [h]);
+    return more[0] || null;
+  } catch { return null; }
+}
+
+/**
+ * A new resume token for an emailed link. The applicant's browser token keeps
+ * working; the newest 10 link tokens are kept. Returns the raw token.
+ */
+export async function addLinkToken(appId) {
+  const token = newToken();
+  await db().query(
+    `UPDATE applications SET link_token_hashes = (ARRAY[$2::text] || link_token_hashes)[1:10] WHERE id = $1`,
+    [appId, hashToken(token)]);
+  return token;
 }
 
 export async function byId(id) {

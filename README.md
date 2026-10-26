@@ -304,3 +304,11 @@ Sent to the student and every parent/guardian email on the application, **from**
 **Gmail only uses that From address if the `SMTP_USER` mailbox is allowed to send as it.** Either set `SMTP_USER` to the admissions@ mailbox (with its own App Password), or in the `SMTP_USER` mailbox go to Settings → Accounts → *Send mail as* → add admissions@pacificdiscovery.org. Otherwise Gmail silently sends from `SMTP_USER`.
 
 Wording is edited in the dashboard (Fee, interview & text → *Email: application fee received*); empty fields use the defaults in `terms-kit.mjs`.
+
+## Application-fee reminders
+
+`netlify/functions/apply-reminders.mjs` runs hourly (Netlify scheduled function). For each application with the full application in, no fee paid, not withdrawn and not stopped by admissions, it sends reminder 1–4 at **1, 4, 10 and 21 days** after `step2_at`, then marks it closed at 28 days (`_lib/reminders.mjs`). Emails go to the student and every parent/guardian (same sender setup as above) with a personal **continue your application** link — a fresh resume token per email, stored hashed in `applications.link_token_hashes` (newest 10), so the applicant's own browser token keeps working.
+
+Off until switched on in the dashboard (Fee, interview & text → Reminders, then Publish). The switch-on time is recorded and only applications completed after it are reminded. Needs pd-dashboard's `MIGRATION-reminders.sql`. A missed run sends only the latest due reminder; each send is claimed in the database first so overlapping runs can't double-send; a failed send is released and retried next hour (`reminders.lastError`). At most 60 emails per run.
+
+Tests: `node test/reminders.test.mjs` (needs `TEST_PG_URL`, included in `npm run test:flow`).

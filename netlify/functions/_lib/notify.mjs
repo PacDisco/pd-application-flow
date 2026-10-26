@@ -266,3 +266,39 @@ export async function sendFeePaidAlert(app) {
   });
   return to;
 }
+
+// ── application fee not paid: reminders ────────────────────────────────────
+
+function interviewDone(app, schema) {
+  const iv = app.interview || {};
+  return !!(app.interview_at || iv.reused || iv.fallback || (iv.skipped && schema?.settings?.allowSkipInterview));
+}
+
+/** Subject, text and HTML for reminder `stage` (1–4). Pure (tested). */
+export function feeReminderContent(app, schema, stage, { link, closeDate } = {}) {
+  const tpl = TK.emailTemplate(schema, `feeReminder${stage}`);
+  const fee = usd(schema?.settings?.appFee ?? 250, schema?.settings?.currency);
+  const vars = {
+    firstName: app.answers?.preferredName || app.first_name || "there",
+    program: app.program || "your Pacific Discovery program",
+    term: app.term || "",
+    fee,
+    link: link || "",
+    nextStep: interviewDone(app, schema)
+      ? `pay the ${fee} application fee so we can review your application.`
+      : `book your interview and pay the ${fee} application fee.`,
+    closeDate: closeDate ? new Date(closeDate).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" }) : "",
+  };
+  const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "");
+  const subject = TK.fillTemplate(tpl.subject, vars).replace(/\s*\(\s*\)/g, "");
+  return { subject, text: familyEmailText(body, null), html: familyEmailHtml(body, null), enabled: tpl.enabled };
+}
+
+export async function sendFeeReminder(app, schema, stage, opts) {
+  const to = familyRecipients(app);
+  if (!to.length) throw new Error("No valid recipient email");
+  const { subject, text, html } = feeReminderContent(app, schema, stage, opts);
+  const { from, replyTo } = applicantFrom();
+  await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
+  return to;
+}
