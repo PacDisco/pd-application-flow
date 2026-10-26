@@ -36,11 +36,11 @@ export function fakeUpstreams({ pdOptions } = {}) {
     contacts: new Map(), deals: new Map(), assoc: new Map(), notes: [], emails: [], meetings: new Map(), meetingAssoc: new Map(), refunds: [], seq: 100,
     pipelines: [
       { id: '1', label: 'PD Applications', stages: [{ id: 'a1', label: 'Application Received', displayOrder: 0 }, { id: 'a2', label: 'Application Complete', displayOrder: 1 }] },
-      { id: '694619955', label: 'Summer Program', stages: [{ id: 's9', label: 'Application Fee Received', displayOrder: 1 }] },
-      { id: '74958084', label: 'Fall Semester', stages: [{ id: 'f9', label: 'Application Fee Received' }] },
-      { id: '74759274', label: 'Spring Semester', stages: [{ id: 'p9', label: 'Application Fee Received' }] },
-      { id: '74958085', label: 'Fall Mini Semester', stages: [{ id: 'fm9', label: 'Application Fee Received' }] },
-      { id: '74755425', label: 'Spring Mini Semester', stages: [{ id: 'sm9', label: 'Application Fee Received' }] },
+      { id: '694619955', label: 'Summer Program', stages: [{ id: 's9', label: 'Application Fee Received', displayOrder: 0 }, { id: 's9i', label: 'Interview', displayOrder: 1 }, { id: 's9c', label: 'Interview Complete', displayOrder: 2 }, { id: 's9d', label: 'Deposit Paid/Customer', displayOrder: 3 }, { id: 's9w', label: 'Closed Won', displayOrder: 4 }, { id: 's9l', label: 'Closed Lost', displayOrder: 5 }, { id: 's9x', label: 'Cancelled', displayOrder: 6 }] },
+      { id: '74958084', label: 'Fall Semester', stages: [{ id: 'f9', label: 'Application Fee Received', displayOrder: 0 }, { id: 'f9i', label: 'Interview', displayOrder: 1 }, { id: 'f9c', label: 'Interview Complete', displayOrder: 2 }, { id: 'f9d', label: 'Deposit Paid/Customer', displayOrder: 3 }, { id: 'f9w', label: 'Closed Won', displayOrder: 4 }, { id: 'f9l', label: 'Closed Lost', displayOrder: 5 }, { id: 'f9x', label: 'Cancelled', displayOrder: 6 }] },
+      { id: '74759274', label: 'Spring Semester', stages: [{ id: 'p9', label: 'Application Fee Received', displayOrder: 0 }, { id: 'p9i', label: 'Interview', displayOrder: 1 }, { id: 'p9c', label: 'Interview Complete', displayOrder: 2 }, { id: 'p9d', label: 'Deposit Paid/Customer', displayOrder: 3 }, { id: 'p9w', label: 'Closed Won', displayOrder: 4 }, { id: 'p9l', label: 'Closed Lost', displayOrder: 5 }, { id: 'p9x', label: 'Cancelled', displayOrder: 6 }] },
+      { id: '74958085', label: 'Fall Mini Semester', stages: [{ id: 'fm9', label: 'Application Fee Received', displayOrder: 0 }, { id: 'fm9i', label: 'Interview', displayOrder: 1 }, { id: 'fm9c', label: 'Interview Complete', displayOrder: 2 }, { id: 'fm9d', label: 'Deposit Paid/Customer', displayOrder: 3 }, { id: 'fm9w', label: 'Closed Won', displayOrder: 4 }, { id: 'fm9l', label: 'Closed Lost', displayOrder: 5 }, { id: 'fm9x', label: 'Cancelled', displayOrder: 6 }] },
+      { id: '74755425', label: 'Spring Mini Semester', stages: [{ id: 'sm9', label: 'Application Fee Received', displayOrder: 0 }, { id: 'sm9i', label: 'Interview', displayOrder: 1 }, { id: 'sm9c', label: 'Interview Complete', displayOrder: 2 }, { id: 'sm9d', label: 'Deposit Paid/Customer', displayOrder: 3 }, { id: 'sm9w', label: 'Closed Won', displayOrder: 4 }, { id: 'sm9l', label: 'Closed Lost', displayOrder: 5 }, { id: 'sm9x', label: 'Cancelled', displayOrder: 6 }] },
     ],
     assocLog: [],
     programs: [

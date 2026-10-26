@@ -13,7 +13,6 @@ Object.assign(process.env, {
 const schema = JSON.parse(readFileSync(new URL('../scripts/seed-schema.json', import.meta.url)));
 const { pool } = await setupDb(schema);
 const up = fakeUpstreams();
-up.crm.pipelines.find((p) => p.id === '74759274').stages.push({ id: 'p10', label: 'Accepted' }, { id: 'p11', label: 'Declined' });
 up.crm.deals.set('900', { id: '900', properties: { pipeline: '74759274', dealstage: 'p9' } });
 const N = await import('../netlify/functions/_lib/notify.mjs');
 const mails = [];
@@ -54,9 +53,19 @@ await t('accept: needs the fee paid; holds the place 7 days; deal → Accepted; 
   assert.equal(d.outcome, 'accepted'); assert.equal(d.by, 'Megan');
   const days = (new Date(d.holdUntil) - new Date(d.at)) / 864e5;
   assert.equal(Math.round(days), 7);
-  assert.equal(up.crm.deals.get('900').properties.dealstage, 'p10');
+  assert.equal(up.crm.deals.get('900').properties.dealstage, 'p9c', 'Accepted → Interview Complete');
   assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Accepted.*Megan/);
   assert.equal((await call({ id, outcome: 'accepted', by: 'Megan' })).status, 409, 'already accepted');
+});
+
+await t('accept never drags a deal backwards (e.g. already at Deposit Paid/Customer)', async () => {
+  up.crm.deals.get('900').properties.dealstage = 'p9d';
+  const id = await insertApp('ahead@x.org');
+  const r = await call({ id, outcome: 'accepted', by: 'Megan' });
+  assert.equal(r.status, 200);
+  assert.equal(up.crm.deals.get('900').properties.dealstage, 'p9d');
+  assert.equal((await decision(id)).hubspot.stage, null);
+  up.crm.deals.get('900').properties.dealstage = 'p9';
 });
 
 await t('decline: refunds the fee (once), emails student + parent, deal → Declined', async () => {
@@ -79,7 +88,7 @@ await t('decline: refunds the fee (once), emails student + parent, deal → Decl
   assert.ok(!/\{\w+\}/.test(m.text), 'no unfilled placeholders');
   assert.ok(!/advisor/i.test(m.text), 'no advisor sales block on a decline');
   assert.equal(d.email.to.length, 2); assert.ok(d.email.hubspot.id, 'logged in HubSpot');
-  assert.equal(up.crm.deals.get('900').properties.dealstage, 'p11');
+  assert.equal(up.crm.deals.get('900').properties.dealstage, 'p9l', 'Declined → Closed Lost');
   assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Not accepted.*refunded: \$258\.75/s);
   const again = await call({ id, outcome: 'declined', by: 'Megan' });
   assert.equal(again.status, 409);

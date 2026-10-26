@@ -94,4 +94,20 @@ t('parent contacts from the answers', () => {
   assert.equal(ps.length, 1);
   assert.equal(ps[0].props.email, 'mum@x.org'); assert.equal(ps[0].props.phone, '+64 21 555');
 });
+
+{
+  const pipe = { stages: [
+    { id: 'f', label: 'Application Fee Received', displayOrder: 0 }, { id: 'i', label: 'Interview', displayOrder: 1 },
+    { id: 'c', label: 'Interview Complete', displayOrder: 2 }, { id: 'd', label: 'Deposit Paid/Customer', displayOrder: 3 },
+    { id: 'w', label: 'Closed Won', displayOrder: 4 }, { id: 'l', label: 'Closed Lost', displayOrder: 5 }, { id: 'x', label: 'Cancelled', displayOrder: 6 }] };
+  assert.equal(R.findStage(pipe, 'interviewBooked').id, 'i', '"Interview", not "Interview Complete"');
+  assert.equal(R.findStage(pipe, 'accepted').id, 'c', 'accepted → Interview Complete');
+  assert.equal(R.findStage(pipe, 'declined').id, 'l', 'declined → Closed Lost, not Cancelled');
+  assert.equal(R.findStage(pipe, 'depositPaid').id, 'd');
+  assert.equal(R.isForward(pipe, 'f', R.findStage(pipe, 'interviewBooked')), true);
+  assert.equal(R.isForward(pipe, 'd', R.findStage(pipe, 'interviewBooked')), false, 'never backwards');
+  assert.equal(R.isForward(pipe, 'd', R.findStage(pipe, 'declined')), true, 'closing is always allowed');
+  assert.equal(R.isForward(pipe, 'l', R.findStage(pipe, 'accepted')), false, 'a closed deal is not reopened automatically');
+  console.log('  ✓ stage mapping for the PD program pipelines');
+}
 console.log(`\n${n} passed`);

@@ -58,8 +58,9 @@ async function moveDeal(app, kind) {
   const pipes = await HS.dealPipelines();
   const pipe = pipes.find((p) => p.id === String(deal?.properties?.pipeline));
   const st = R.findStage(pipe, kind);
-  if (st) await HS.updateDeal(app.hubspot_deal_id, { dealstage: st.id });
-  return { pipeline: pipe?.label || null, stage: st?.label || null };
+  const move = st && R.isForward(pipe, deal?.properties?.dealstage, st);
+  if (move) await HS.updateDeal(app.hubspot_deal_id, { dealstage: st.id });
+  return { pipeline: pipe?.label || null, stage: move ? st.label : null };
 }
 
 /**

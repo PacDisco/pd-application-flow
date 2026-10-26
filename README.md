@@ -327,6 +327,10 @@ Families can also book from the "Book your interview" button in their emails, a 
 
 Made in the dashboard (Applications → open an applicant → **Accept** / **Decline**; roles in the dashboard's `APPLY_DECISION_ROLES`, default admin + admissions) and carried out here through `POST /api/service/decision` (`_lib/decisions.mjs`). Needs pd-dashboard's `MIGRATION-decisions.sql`.
 
-- **Accept** (fee must be paid): place held for 7 days (`settings.acceptance.holdDays`), HubSpot deal → an "Accepted" stage when the pipeline has one, note on the timeline. *The acceptance email and deposit page come with the payment-plan release.*
-- **Decline**: refunds the application fee in full through Stripe first — the default unless they had been accepted, and admissions can untick it. If Stripe refuses, nothing else happens. Then the student and parents get the editable "not accepted" email (logged in HubSpot), the deal moves to a Declined / Closed lost stage when there is one, and a note records the refund. Reminders stop. Declines are final from the dashboard.
+- **Accept** (fee must be paid): place held for 7 days (`settings.acceptance.holdDays`), HubSpot deal → "Interview Complete" (your pipelines have no "Accepted" stage; the deposit moves it on to "Deposit Paid/Customer"), note on the timeline. *The acceptance email and deposit page come with the payment-plan release.*
+- **Decline**: refunds the application fee in full through Stripe first — the default unless they had been accepted, and admissions can untick it. If Stripe refuses, nothing else happens. Then the student and parents get the editable "not accepted" email (logged in HubSpot), the deal moves to "Closed Lost", and a note records the refund. Reminders stop. Declines are final from the dashboard.
 - One decision at a time per application, so a double click can't refund or email twice.
+
+### HubSpot stages (PD program pipelines)
+
+Application Fee Received → Interview → Interview Complete → Deposit Paid/Customer → Closed Won / Closed Lost / Cancelled. Fee paid → *Application Fee Received*, or *Interview* if the interview is already booked; interview booked later → *Interview*; accepted → *Interview Complete*; declined → *Closed Lost*. Automatic moves only ever go forward (`routing.isForward`) — a deal admissions has already moved on is never dragged back; closing a deal is always allowed.

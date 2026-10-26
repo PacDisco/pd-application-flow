@@ -25,11 +25,31 @@ export const KNOWN_PIPELINE_IDS = {
 export const STAGES = {
   applicationReceived: [/application\s*(received|started|submitted)/i, /^new\s*application/i],
   applicationComplete: [/application\s*complete/i],
-  interviewBooked: [/interview\s*(scheduled|booked)/i],
+  // Your program pipelines call it plain "Interview" (never "Interview Complete").
+  interviewBooked: [/interview\s*(scheduled|booked)/i, /^interview$/i],
   appFee: [/application\s*fee\s*(received|paid)/i],
-  accepted: [/^accepted/i, /accepted/i, /offer\s*(made|sent)/i],
+  // No "Accepted" stage in the PD program pipelines: an accepted applicant has
+  // had their interview, so they go to "Interview Complete" until the deposit
+  // moves them to "Deposit Paid/Customer".
+  accepted: [/^accepted/i, /accepted/i, /offer\s*(made|sent)/i, /interview\s*complete/i],
+  depositPaid: [/deposit\s*(paid|received)/i],
   declined: [/declined/i, /not\s*accepted/i, /rejected/i, /unsuccessful/i, /closed\s*lost/i],
 };
+
+/**
+ * Whether moving a deal from `fromId` to `toStage` is a step forward in the
+ * pipeline (by display order). Used so an automatic move never drags a deal
+ * back, e.g. from "Deposit Paid/Customer" to "Interview". Closed stages are
+ * always allowed — they are explicit decisions.
+ */
+export function isForward(pipeline, fromId, toStage) {
+  if (!toStage) return false;
+  if (/closed|cancel/i.test(toStage.label || "")) return true;
+  const from = (pipeline?.stages || []).find((s) => String(s.id) === String(fromId));
+  if (!from) return true;
+  if (/closed|cancel/i.test(from.label || "")) return false;
+  return (toStage.displayOrder ?? 0) > (from.displayOrder ?? 0);
+}
 
 /** "Summer Program" | "Fall Semester" | … or null when it can't be decided. */
 export function targetPipelineLabel(programType, season) {

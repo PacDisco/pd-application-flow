@@ -231,7 +231,7 @@ await t('returning from Stripe marks paid and moves the deal to Spring Semester'
   assert.equal(row.payment.total, 258.75); assert.equal(row.payment.base, 250); assert.equal(row.payment.surcharge, 8.75);
   const deal = up.crm.deals.get(row.hubspot_deal_id).properties;
   assert.equal(deal.pipeline, '74759274');
-  assert.equal(deal.dealstage, 'p9');
+  assert.equal(deal.dealstage, 'p9i', 'interview already booked → Interview');
   assert.equal(deal.pd_program, 'South America Semester');
   assert.equal(deal.travel_year, '2027');
   assert.match(deal.payment_1, new RegExp(`^250, pi_${session.id}, \\d{4}-\\d{2}-\\d{2}$`));
@@ -403,7 +403,7 @@ await t('Zap mode (HUBSPOT_SYNC=off): payment still finds the Zap-made deal', as
   const st = await call(`status?token=${tok}&session_id=${sess.id}`, null, 'GET');
   assert.equal(st.body.paid, true);
   const deal = up.crm.deals.get('901').properties;
-  assert.equal(deal.pipeline, '694619955'); assert.equal(deal.dealstage, 's9');
+  assert.equal(deal.pipeline, '694619955'); assert.equal(deal.dealstage, 's9i', 'interview booked → Interview');
   assert.equal(deal.pd_program, 'Bali Summer Program'); assert.equal(deal.travel_year, '2027');
   assert.ok(deal.payment_1.startsWith('250, pi_'));
   process.env.HUBSPOT_SYNC = 'on'; process.env.JOTFORM_MIRROR = 'on';

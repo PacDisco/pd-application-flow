@@ -445,7 +445,9 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
         const pipes = await HS.dealPipelines();
         const pipe = pipes.find((p) => p.id === String(deal?.properties?.pipeline));
         const st = R.findStage(pipe, "interviewBooked");
-        if (st && pipe && R.APPLICANT_PIPELINE.test(pipe.label)) await HS.updateDeal(dealId, { dealstage: st.id });
+        // PD Applications, or a program pipeline still at "Application Fee
+        // Received" (interview booked after paying) — never backwards.
+        if (st && pipe && R.isForward(pipe, deal?.properties?.dealstage, st)) await HS.updateDeal(dealId, { dealstage: st.id });
       }
       await setSync(app.id, { hsInterview: ok() });
       out.hsInterview = "ok";
@@ -660,7 +662,11 @@ export async function applyAppFee(app, schema) {
   const { facts, pdProgram } = await pdProgramFor(schema, app);
   const label = R.targetPipelineLabel(facts.programType, facts.season);
   const pipeline = R.findPipeline(pipes, label);
-  const stage = pipeline ? R.findStage(pipeline, "appFee") : null;
+  // Interview already booked (step 3, or found in HubSpot) → straight to
+  // "Interview"; otherwise "Application Fee Received".
+  const feeStage = pipeline ? R.findStage(pipeline, "appFee") : null;
+  const ivStage = pipeline && app.interview_at ? R.findStage(pipeline, "interviewBooked") : null;
+  const stage = feeStage ? (ivStage || feeStage) : null;
   const pay = app.payment || {};
   const update = R.appFeeDealUpdate({
     facts, pipeline: stage ? pipeline : null, stage, pdProgram, dealProps: deal?.properties || {},
