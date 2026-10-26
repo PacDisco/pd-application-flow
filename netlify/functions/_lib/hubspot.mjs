@@ -232,6 +232,28 @@ export async function addNote(html, { contactId, dealId } = {}) {
   return hs("/crm/v3/objects/notes", { method: "POST", body: { properties: { hs_note_body: html, hs_timestamp: new Date().toISOString() }, associations } });
 }
 
+/** Meetings on a contact's timeline (newest first, up to 50). */
+export async function contactMeetings(contactId) {
+  const assoc = await hs(`/crm/v4/objects/contacts/${contactId}/associations/meetings?limit=100`);
+  const ids = (assoc?.results || []).map((r) => String(r.toObjectId)).slice(-50);
+  if (!ids.length) return [];
+  const data = await hs("/crm/v3/objects/meetings/batch/read", {
+    method: "POST",
+    body: {
+      inputs: ids.map((id) => ({ id })),
+      properties: ["hs_meeting_title", "hs_meeting_start_time", "hs_meeting_end_time", "hs_meeting_outcome", "hs_createdate", "hs_meeting_source"],
+    },
+  });
+  return (data?.results || []).map((m) => ({
+    id: String(m.id),
+    title: m.properties?.hs_meeting_title || "",
+    start: m.properties?.hs_meeting_start_time || null,
+    outcome: m.properties?.hs_meeting_outcome || "",
+    createdAt: m.properties?.hs_createdate || null,
+    source: m.properties?.hs_meeting_source || "",
+  }));
+}
+
 /**
  * Log an email we sent on the contacts' (and deal's) activity timeline, as a
  * logged outgoing email (CRM Emails object). HubSpot-defined association

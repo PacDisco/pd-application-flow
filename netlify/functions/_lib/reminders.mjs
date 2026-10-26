@@ -21,6 +21,7 @@ import { siteUrl } from "./http.mjs";
 import * as A from "./applications.mjs";
 import { mailOn, sendFeeReminder } from "./notify.mjs";
 import { logFamilyEmail } from "./email-log.mjs";
+import { refreshInterview } from "./interview-check.mjs";
 import { FEE_REMINDER_DAYS, FEE_CLOSE_DAYS, emailTemplate } from "../../../public/terms-kit.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -47,6 +48,7 @@ export function reminderAction(app, schema, now = new Date()) {
   if (!app.step2_at) return { action: "none", reason: "no full application" };
   if (app.paid_at) return { action: "none", reason: "paid" };
   if (app.status === "withdrawn") return { action: "none", reason: "withdrawn" };
+  if (app.decision?.outcome === "declined") return { action: "none", reason: "declined" };
   const r = app.reminders || {};
   if (r.stopped) return { action: "none", reason: "stopped" };
   if (r.closedAt) return { action: "none", reason: "closed" };
@@ -121,12 +123,12 @@ export async function runReminders({ schema, now = new Date(), log = console } =
   if (!reminderSettings(schema).enabled) { out.off = true; return out; }
   if (!mailOn()) { out.off = true; out.reason = "SMTP not configured"; return out; }
   const rows = await db().query(
-    `SELECT ${A.COLS}, reminders FROM applications
+    `SELECT ${A.COLS}, reminders, to_jsonb(applications)->'decision' AS decision FROM applications
       WHERE paid_at IS NULL AND step2_at IS NOT NULL AND status <> 'withdrawn'
         AND step2_at > now() - interval '${FEE_CLOSE_DAYS + 7} days'
         AND NOT (reminders ? 'stopped') AND NOT (reminders ? 'closedAt')
       ORDER BY step2_at LIMIT 1000`);
-  for (const app of rows) {
+  for (let app of rows) {
     out.checked++;
     const act = reminderAction(app, schema, now);
     if (act.action === "close") { await markClosed(app.id); out.closed++; continue; }
@@ -134,6 +136,13 @@ export async function runReminders({ schema, now = new Date(), log = console } =
     if (act.action !== "send") continue;
     if (out.sent >= MAX_SENDS_PER_RUN) { out.deferred = (out.deferred || 0) + 1; continue; }
     if (!(await claim(app.id, act.stage, act.skip))) continue;
+    // Booked from an email or by admissions? Then the email says "pay the fee"
+    // rather than "book your interview".
+    if (!app.interview_at) {
+      const had = app.interview_at;
+      app = { ...app, ...(await refreshInterview(app, schema, { log, now })) };
+      if (app.interview_at && !had) out.interviewsFound = (out.interviewsFound || 0) + 1;
+    }
     try {
       const token = await A.addLinkToken(app.id);
       const link = `${siteUrl()}/?token=${encodeURIComponent(token)}`;

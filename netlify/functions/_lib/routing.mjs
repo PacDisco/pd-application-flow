@@ -27,6 +27,8 @@ export const STAGES = {
   applicationComplete: [/application\s*complete/i],
   interviewBooked: [/interview\s*(scheduled|booked)/i],
   appFee: [/application\s*fee\s*(received|paid)/i],
+  accepted: [/^accepted/i, /accepted/i, /offer\s*(made|sent)/i],
+  declined: [/declined/i, /not\s*accepted/i, /rejected/i, /unsuccessful/i, /closed\s*lost/i],
 };
 
 /** "Summer Program" | "Fall Semester" | … or null when it can't be decided. */

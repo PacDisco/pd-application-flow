@@ -318,3 +318,15 @@ Tests: `node test/reminders.test.mjs` (needs `TEST_PG_URL`, included in `npm run
 Every email sent to a family (fee confirmation, the four fee reminders, and the later acceptance / payment emails) is logged as an outgoing email on the **student's and each parent's contact timeline and on the deal** (`_lib/email-log.mjs` → CRM Emails object, association types 198 contact / 210 deal). Reminder links are logins, so the logged copy has the personal link replaced with the plain site address.
 
 Logging needs the HubSpot private app to be allowed to create email engagements. If HubSpot refuses (403, missing scope), the email still goes; the application shows *Fee confirmation logged in HubSpot — needs a look* with HubSpot's message. Add the scope it names to the private app, then **Retry sync** — the log is written then, and the family is not emailed again. Admissions-only alerts (new applicant, interview needed, fee paid) are not logged on the family's timeline.
+
+## Interviews booked outside the application
+
+Families can also book from the "Book your interview" button in their emails, a link admissions sends, or on a call — those bookings go straight into HubSpot. Before any email to the family (fee confirmation, each reminder) and on every sync / **Retry sync**, `_lib/interview-check.mjs` looks at the meetings on the student's HubSpot contact. A meeting counts when its title contains the dashboard's *interview match* text (default "interview"), it was created after the application started, and it isn't cancelled, rescheduled or a no-show; the earliest upcoming one wins. The application is then marked interview-booked (`interview.source = "hubspot"`), emails say "pay the fee" instead of "book your interview", and the dashboard shows it. The time is shown in `INTERVIEW_TZ` (default `America/Denver`). Needs the HubSpot private app to read meetings; if it can't, nothing breaks — the application just stays "not booked".
+
+## Decisions: accept / decline
+
+Made in the dashboard (Applications → open an applicant → **Accept** / **Decline**; roles in the dashboard's `APPLY_DECISION_ROLES`, default admin + admissions) and carried out here through `POST /api/service/decision` (`_lib/decisions.mjs`). Needs pd-dashboard's `MIGRATION-decisions.sql`.
+
+- **Accept** (fee must be paid): place held for 7 days (`settings.acceptance.holdDays`), HubSpot deal → an "Accepted" stage when the pipeline has one, note on the timeline. *The acceptance email and deposit page come with the payment-plan release.*
+- **Decline**: refunds the application fee in full through Stripe first — the default unless they had been accepted, and admissions can untick it. If Stripe refuses, nothing else happens. Then the student and parents get the editable "not accepted" email (logged in HubSpot), the deal moves to a Declined / Closed lost stage when there is one, and a note records the refund. Reminders stop. Declines are final from the dashboard.
+- One decision at a time per application, so a double click can't refund or email twice.

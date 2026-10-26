@@ -20,6 +20,7 @@ import * as JF from "./jotform.mjs";
 import * as R from "./routing.mjs";
 import { alertOn, mailOn, sendStep1Alert, sendInterviewNeededAlert, sendFeeConfirmation, sendFeePaidAlert, familyRecipients, feeConfirmationContent, applicantFrom } from "./notify.mjs";
 import { logFamilyEmail } from "./email-log.mjs";
+import { refreshInterview } from "./interview-check.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
 import { emailTemplate } from "../../../public/terms-kit.mjs";
 
@@ -371,6 +372,14 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
     else { await setSync(app.id, { interviewNeeded: ok(res), interviewNeededError: undefined }); out.interviewNeeded = "ok"; }
   }
 
+  // ── Interview booked outside the application? (HubSpot meeting) ─────────
+  // Before anything emails the family, so the email knows.
+  if (app.step2_at && !app.interview_at && hsReady) {
+    const before = app.interview_at;
+    app = await refreshInterview(app, schema, { log });
+    if (app.interview_at && !before) out.interviewFound = app.interview?.label || "yes";
+  }
+
   // ── Application fee paid → confirmation to the family + alert admissions ─
   // Student and parents get the receipt + next steps with the terms they were
   // shown at checkout (the version is recorded on the payment). Only for fees
@@ -427,7 +436,10 @@ async function syncOnce(app, schema, log, { inline = false } = {}) {
     try {
       const { contactId, dealId } = await resolveHubspot(app, schema);
       const when = app.interview?.label || app.interview?.start || "a time chosen in the scheduler";
-      await HS.addNote(`<p><strong>Admissions interview booked</strong> via the online application: ${escapeHtml(when)}.</p>`, { contactId, dealId });
+      // A meeting found in HubSpot is already on the timeline — no note.
+      if (app.interview?.source !== "hubspot") {
+        await HS.addNote(`<p><strong>Admissions interview booked</strong> via the online application: ${escapeHtml(when)}.</p>`, { contactId, dealId });
+      }
       if (dealId) {
         const deal = await HS.getDeal(dealId);
         const pipes = await HS.dealPipelines();

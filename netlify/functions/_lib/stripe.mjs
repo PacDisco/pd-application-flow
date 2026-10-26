@@ -8,10 +8,14 @@ function secret() {
   return k;
 }
 
-async function stripe(path, { method = "GET", params } = {}) {
+async function stripe(path, { method = "GET", params, idempotencyKey } = {}) {
   const res = await fetch(`https://api.stripe.com/v1${path}`, {
     method,
-    headers: { Authorization: `Bearer ${secret()}`, ...(params ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
+    headers: {
+      Authorization: `Bearer ${secret()}`,
+      ...(params ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+    },
     body: params ? params.toString() : undefined,
   });
   const data = await res.json();
@@ -80,6 +84,20 @@ export async function createAppFeeCheckout({ app, fee, currency, successUrl, can
   }
   p.append("payment_intent_data[description]", `Application fee — ${app.first_name || ""} ${app.last_name || ""}`.trim());
   return stripe("/checkout/sessions", { method: "POST", params: p });
+}
+
+/**
+ * Refund a payment in full (or `amount` dollars). The idempotency key makes a
+ * double click, or a retry after a timeout, refund only once.
+ */
+export async function refundPayment(paymentIntent, { amount = null, key, reason = "requested_by_customer", metadata = {} } = {}) {
+  if (!/^pi_/.test(String(paymentIntent || ""))) throw Object.assign(new Error("No Stripe payment to refund for this application."), { status: 409 });
+  const p = new URLSearchParams();
+  p.append("payment_intent", paymentIntent);
+  if (amount != null) p.append("amount", String(Math.round(Number(amount) * 100)));
+  p.append("reason", reason);
+  for (const [k, v] of Object.entries(metadata)) p.append(`metadata[${k}]`, String(v));
+  return stripe("/refunds", { method: "POST", params: p, idempotencyKey: key });
 }
 
 export async function getCheckoutSession(id) {

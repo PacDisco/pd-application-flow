@@ -33,7 +33,7 @@ export function memoryStore() {
 export function fakeUpstreams({ pdOptions } = {}) {
   const calls = [];
   const crm = {
-    contacts: new Map(), deals: new Map(), assoc: new Map(), notes: [], emails: [], seq: 100,
+    contacts: new Map(), deals: new Map(), assoc: new Map(), notes: [], emails: [], meetings: new Map(), meetingAssoc: new Map(), refunds: [], seq: 100,
     pipelines: [
       { id: '1', label: 'PD Applications', stages: [{ id: 'a1', label: 'Application Received', displayOrder: 0 }, { id: 'a2', label: 'Application Complete', displayOrder: 1 }] },
       { id: '694619955', label: 'Summer Program', stages: [{ id: 's9', label: 'Application Fee Received', displayOrder: 1 }] },
@@ -115,6 +115,10 @@ export function fakeUpstreams({ pdOptions } = {}) {
       if ((m = /^\/crm\/v4\/objects\/contacts\/(\d+)\/associations\/deals$/.exec(p))) {
         return J({ results: (crm.assoc.get(m[1]) || []).map((id) => ({ toObjectId: Number(id) })) });
       }
+      if ((m = /^\/crm\/v4\/objects\/contacts\/(\w+)\/associations\/meetings$/.exec(p))) {
+        return J({ results: (crm.meetingAssoc.get(m[1]) || []).map((id) => ({ toObjectId: id })) });
+      }
+      if (p === '/crm/v3/objects/meetings/batch/read') return J({ results: b.inputs.map((i) => crm.meetings.get(String(i.id))).filter(Boolean) });
       if (p === '/crm/v3/objects/deals/batch/read') return J({ results: b.inputs.map((i) => crm.deals.get(i.id)).filter(Boolean) });
       if (p === '/crm/v3/objects/notes') { crm.notes.push(b); return J({ id: 'n1' }); }
       if (p === '/crm/v3/objects/emails') { if (crm.emailsForbidden) return J({ message: 'This app hasn\'t been granted all required scopes to make this call.', category: 'MISSING_SCOPES' }, 403); crm.emails.push(b); return J({ id: `e${crm.emails.length}` }); }
@@ -188,6 +192,17 @@ export function fakeUpstreams({ pdOptions } = {}) {
         const s = { id, url: `https://checkout.stripe.com/c/pay/${id}`, client_reference_id: f.get('client_reference_id'), amount_total: amount, currency: 'usd', metadata: meta, payment_status: 'unpaid', payment_intent: `pi_${id}`, created: Math.floor(Date.now() / 1000), success_url: f.get('success_url'), form: f };
         stripe.sessions.set(id, s);
         return J(s);
+      }
+      if (p === '/v1/refunds' && method === 'POST') {
+        const f = new URLSearchParams(body);
+        const key = init.headers?.['Idempotency-Key'] || null;
+        stripe.refunds = stripe.refunds || [];
+        const prev = key && stripe.refunds.find((r) => r.key === key);
+        if (prev) return J(prev.refund);
+        if (stripe.refundFail) return J({ error: { message: stripe.refundFail } }, 400);
+        const refund = { id: `re_${stripe.refunds.length + 1}`, object: 'refund', payment_intent: f.get('payment_intent'), amount: Number(f.get('amount') || 25875), status: 'succeeded', currency: 'usd' };
+        stripe.refunds.push({ key, refund, form: f });
+        return J(refund);
       }
       let m;
       if ((m = /^\/v1\/checkout\/sessions\/(.+)$/.exec(p))) return J(stripe.sessions.get(m[1]) || {}, stripe.sessions.has(m[1]) ? 200 : 404);

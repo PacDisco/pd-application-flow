@@ -6,12 +6,15 @@
 //   GET  /api/service/submission/<pda_id>?form=step2
 //   POST /api/service/submission/<pda_id>     form-encoded submission[qid]=… (portal edits)
 //   POST /api/service/resync   { id }         re-run Jotform/HubSpot sync (dashboard)
+//   POST /api/service/decision { id, outcome: "accepted"|"declined", by, message?, refund? }
+//                                             admissions decision (dashboard) — see _lib/decisions.mjs
 
 import { db, publishedSchema } from "./_lib/db.mjs";
 import { serviceOk, json, errorResponse, fileUrl } from "./_lib/http.mjs";
 import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
+import { decide } from "./_lib/decisions.mjs";
 
 export const config = { path: ["/api/service/*"] };
 
@@ -66,6 +69,11 @@ export default async (req) => {
         sync = sync - 'hsError' - 'hsPaidError' - 'hsInterviewError' WHERE id = ${id}`;
       const result = await A.syncApplication(id, { schema });
       return json({ ok: true, result, app: await A.byId(id) });
+    }
+    if (req.method === "POST" && route === "decision") {
+      const b = await req.json();
+      const decision = await decide(String(b.id || ""), { outcome: b.outcome, by: b.by, message: b.message, refund: b.refund }, { schema });
+      return json({ ok: true, decision });
     }
     return json({ error: "Not found" }, 404);
   } catch (err) {

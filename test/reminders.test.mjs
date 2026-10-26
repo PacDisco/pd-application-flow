@@ -52,6 +52,7 @@ await t('schedule: paid, withdrawn, stopped, closed, or finished before switch-o
   const s2 = { ...schema, settings: { ...schema.settings, feeReminders: { enabled: true, since: ago(5) } } };
   assert.equal(R.reminderAction({ ...base, step2_at: ago(4.5), paid_at: ago(1) }, schema, now).reason, 'paid');
   assert.equal(R.reminderAction({ ...base, step2_at: ago(4.5), status: 'withdrawn' }, schema, now).reason, 'withdrawn');
+  assert.equal(R.reminderAction({ ...base, step2_at: ago(4.5), decision: { outcome: 'declined' } }, schema, now).reason, 'declined');
   assert.equal(R.reminderAction({ ...base, step2_at: ago(4.5), reminders: { stopped: { at: ago(1) } } }, schema, now).reason, 'stopped');
   assert.equal(R.reminderAction({ ...base, step2_at: ago(4.5), reminders: { closedAt: ago(1) } }, schema, now).reason, 'closed');
   assert.equal(R.reminderAction({ ...base, step2_at: ago(6) }, s2, now).reason, 'before reminders were switched on');
@@ -181,6 +182,39 @@ await t('each reminder is logged on HubSpot — with the personal login link rem
     assert.deepEqual(e.associations.map((a) => [a.to.id, a.types[0].associationTypeId]), [['C9', 198], ['D9', 210]]);
     assert.ok(mails.at(-1).text.includes('token='), 'the family still gets their personal link');
     assert.equal((await rem(id)).reminders.sent['1'].hubspot.id, 'e1');
+  } finally { delete process.env.HUBSPOT_TOKEN; up.restore(); }
+});
+
+await t('interview check: picks the right HubSpot meeting', async () => {
+  const IC = await import('../netlify/functions/_lib/interview-check.mjs');
+  const app = { step1_at: ago(5) };
+  const mk = (id, title, startDays, extra = {}) => ({ id, title, start: new Date(now.getTime() + startDays * DAY).toISOString(), createdAt: ago(2), outcome: 'SCHEDULED', ...extra });
+  assert.equal(IC.pickInterview([mk('1', 'Team sync', 2)], app, schema, now), null, 'title must match');
+  assert.equal(IC.pickInterview([mk('1', 'Pacific Discovery Interview', 2, { outcome: 'CANCELED' })], app, schema, now), null, 'cancelled');
+  assert.equal(IC.pickInterview([mk('1', 'Pacific Discovery Interview', 2, { createdAt: ago(40) })], app, schema, now), null, 'from before this application');
+  assert.equal(IC.pickInterview([mk('1', 'Interview', -1), mk('2', 'Interview', 3), mk('3', 'Interview', 1)], app, schema, now).id, '3', 'earliest upcoming');
+  assert.equal(IC.pickInterview([mk('1', 'Interview', -3), mk('2', 'Interview', -1)], app, schema, now).id, '2', 'else latest past');
+  assert.equal(IC.pickInterview([mk('1', 'Admissions chat', 2)], app, { settings: { interviewMatch: 'admissions chat' } }, now).id, '1', 'match is a dashboard setting');
+  assert.match(IC.interviewLabel('2026-11-03T16:00:00Z'), /^Tuesday, November 3, 2026 at 9:00 AM MST$/);
+});
+
+await t('interview booked from an email → found in HubSpot before the next reminder', async () => {
+  const { fakeUpstreams } = await import('./harness.mjs');
+  const up = fakeUpstreams();
+  process.env.HUBSPOT_TOKEN = 'x';
+  try {
+    const id = await insertApp('booked@x.org', 4.3, { reminders: { sent: { 1: { at: ago(3) } } } });
+    await pool.query(`UPDATE applications SET hubspot_contact_id = '777' WHERE id = $1`, [id]);
+    up.crm.meetings.set('m1', { id: 'm1', properties: { hs_meeting_title: 'Pacific Discovery Interview', hs_meeting_start_time: new Date(now.getTime() + 2 * DAY).toISOString(), hs_meeting_outcome: 'SCHEDULED', hs_createdate: ago(1) } });
+    up.crm.meetingAssoc.set('777', ['m1']);
+    const out = await R.runReminders({ schema, now, log: { error() {}, warn() {} } });
+    assert.equal(out.sent, 1); assert.equal(out.interviewsFound, 1);
+    const mail = mails.at(-1);
+    assert.match(mail.text, /pay the \$250 application fee so we can review your application/);
+    assert.ok(!/book your interview/i.test(mail.text));
+    const [row] = (await pool.query('SELECT interview_at, interview, status FROM applications WHERE id = $1', [id])).rows;
+    assert.ok(row.interview_at); assert.equal(row.interview.source, 'hubspot'); assert.equal(row.interview.meetingId, 'm1');
+    assert.equal(row.status, 'interview');
   } finally { delete process.env.HUBSPOT_TOKEN; up.restore(); }
 });
 

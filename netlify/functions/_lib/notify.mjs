@@ -320,3 +320,32 @@ export async function sendFeeReminder(app, schema, stage, opts) {
   await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
   return { to, from, subject, text, html };
 }
+
+// ── decision: not accepted ─────────────────────────────────────────────────
+
+/** Subject, text and HTML for the "not accepted" email. Pure (tested). */
+export function declinedContent(app, schema, { message = "", refund = null } = {}) {
+  const tpl = TK.emailTemplate(schema, "declined");
+  const cur = app.payment?.currency || schema?.settings?.currency || "usd";
+  const vars = {
+    firstName: app.answers?.preferredName || app.first_name || "there",
+    program: app.program || "your Pacific Discovery program",
+    term: app.term || "",
+    message: String(message || "").trim(),
+    refund: refund?.amount
+      ? `We've refunded your application fee of ${usd(refund.amount / 100, cur)} to the card you paid with. It usually shows on your statement within 5–10 business days.`
+      : "",
+  };
+  const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "");
+  const subject = TK.fillTemplate(tpl.subject, vars).replace(/\s*\(\s*\)/g, "");
+  return { subject, text: familyEmailText(body, null), html: familyEmailHtml(body, null), enabled: tpl.enabled };
+}
+
+export async function sendDeclined(app, schema, opts) {
+  const to = familyRecipients(app);
+  if (!to.length) throw new Error("No valid recipient email");
+  const { subject, text, html } = declinedContent(app, schema, opts);
+  const { from, replyTo } = applicantFrom();
+  await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
+  return { to, from, subject, text, html };
+}
