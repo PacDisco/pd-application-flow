@@ -208,3 +208,16 @@ export async function createSetupCheckout({ app, customer, successUrl, cancelUrl
 export async function getSetupIntent(id) {
   return stripe(`/setup_intents/${encodeURIComponent(id)}?expand[]=payment_method`);
 }
+
+/**
+ * Expire an unfinished Checkout session (they started paying, then started
+ * again). Returns true if it's now closed without payment; false if it was
+ * already completed (paid / clearing) — then don't start another.
+ */
+export async function expireCheckout(id) {
+  try { await stripe(`/checkout/sessions/${encodeURIComponent(id)}/expire`, { method: "POST", params: new URLSearchParams() }); return true; }
+  catch (err) {
+    const s = await stripe(`/checkout/sessions/${encodeURIComponent(id)}`).catch(() => null);
+    return !s || s.status === "expired";
+  }
+}

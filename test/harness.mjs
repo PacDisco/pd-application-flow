@@ -231,6 +231,11 @@ export function fakeUpstreams({ pdOptions } = {}) {
       }
       if ((m = /^\/v1\/setup_intents\/([^/?]+)/.exec(p))) return J({ id: m[1], payment_method: { id: stripe.setupPm || 'pm_new', type: stripe.setupPmType || 'card' } });
       if ((m = /^\/v1\/payment_intents\/(.+)$/.exec(p))) return J({ id: m[1], object: 'payment_intent', payment_method: `pm_${m[1]}` });
+      if ((m = /^\/v1\/checkout\/sessions\/([^/]+)\/expire$/.exec(p)) && method === 'POST') {
+        const ss = stripe.sessions.get(m[1]);
+        if (!ss || ss.status !== 'open') return J({ error: { message: 'Only Checkout Sessions with a status of open can be expired.' } }, 400);
+        ss.status = 'expired'; return J(ss);
+      }
       if ((m = /^\/v1\/checkout\/sessions\/(.+)$/.exec(p))) return J(stripe.sessions.get(m[1]) || {}, stripe.sessions.has(m[1]) ? 200 : 404);
       return J({ error: { message: 'fake stripe unhandled' } }, 404);
     }

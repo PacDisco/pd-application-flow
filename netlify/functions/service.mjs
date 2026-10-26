@@ -12,6 +12,9 @@
 //   POST /api/service/withdraw { id, by, reason }    withdrew after the deposit: cancel future payments, deal → Cancelled
 //   POST /api/service/payment-retry { id, item, by } try a failed payment again on the next run
 //   POST /api/service/payments-pause { id, paused, by }
+//   POST /api/service/payment-mark-paid { id, item, reference, by }  paid outside Stripe (bank transfer)
+//   GET  /api/service/plan?dealId=&email=            the student portal: payment plan for a deal
+//   POST /api/service/plan-link { dealId, email }    the student portal: a personal link to manage it
 
 import { db, publishedSchema } from "./_lib/db.mjs";
 import { serviceOk, json, errorResponse, fileUrl } from "./_lib/http.mjs";
@@ -82,6 +85,20 @@ export default async (req) => {
     if (req.method === "POST" && route === "payment-retry") {
       const b = await req.json();
       return json({ ok: true, item: await PAY.retryItem(String(b.id || ""), Number(b.item), { by: b.by }) });
+    }
+    if (req.method === "GET" && route === "plan") {
+      const app = await PAY.appForPortal({ dealId: url.searchParams.get("dealId"), email: url.searchParams.get("email") });
+      return json({ plan: app ? PAY.portalPlan(app) : null });
+    }
+    if (req.method === "POST" && route === "plan-link") {
+      const b = await req.json();
+      const app = await PAY.appForPortal({ dealId: b.dealId, email: b.email });
+      if (!app || !PAY.portalPlan(app)) return json({ error: "No payment plan for this enrolment." }, 404);
+      return json({ url: await PAY.portalLink(app) });
+    }
+    if (req.method === "POST" && route === "payment-mark-paid") {
+      const b = await req.json();
+      return json({ ok: true, item: await PAY.markPaidOutside(String(b.id || ""), Number(b.item), { by: b.by, reference: b.reference }, schema) });
     }
     if (req.method === "POST" && route === "payments-pause") {
       const b = await req.json();

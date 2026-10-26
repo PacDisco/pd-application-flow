@@ -360,6 +360,64 @@ await t('paused: no notices or charges until resumed', async () => {
   assert.equal((await enrolment(id)).schedule[1].status, 'paid');
 });
 
+await t('pay the rest early: one checkout covers every open payment; automatic ones stop; one receipt', async () => {
+  const { id, token, deal, e } = await enrolled('early@x.org');
+  await run(at(e.schedule[1].due));
+  const r = await api('pay-item', { token, index: 'rest', method: 'card' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  assert.equal(s.amount_total, 1137500 + 39813, '7 × $1,625 + 3.5%');
+  assert.equal(s.metadata.items, '2,3,4,5,6,7,8');
+  // started again (closed the tab): the first checkout is closed so it can't also be paid
+  const again = await api('pay-item', { token, index: 'rest', method: 'card' });
+  assert.equal(again.status, 200);
+  assert.equal(s.status, 'expired');
+  const s2 = up.stripe.sessions.get(again.body.url.split('/').pop());
+  Object.assign(s2, { status: 'complete', payment_status: 'paid' });
+  // …and once one has been paid, no new checkout
+  assert.equal((await api('pay-item', { token, index: 'rest', method: 'card' })).status, 409);
+  const before = mails.length;
+  await hook('checkout.session.completed', s2);
+  await hook('checkout.session.completed', s2);
+  assert.deepEqual(await status(id), Array(9).fill('paid'));
+  assert.equal(mails.length, before + 1, 'one receipt');
+  assert.match(mails.at(-1).text, /paid in full/);
+  assert.ok(Object.values(up.crm.deals.get(deal).properties).some((v) => /^11375, /.test(String(v))), 'one payment_N for the lot');
+  const charges = chargesFor(id);
+  await run(at(e.schedule[2].due));
+  assert.equal(chargesFor(id), charges, 'nothing charged after');
+  assert.equal((await api(`offer?token=${token}`)).body.offer.rest, 0);
+});
+
+await t('admissions marks a bank transfer as paid: it is never charged', async () => {
+  const { id, e } = await enrolled('wire@x.org');
+  const r = await svc('payment-mark-paid', { id, item: 1, reference: 'Wise 123', by: 'Megan' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.item.status, 'paid'); assert.equal(r.body.item.method, 'manual'); assert.equal(r.body.item.markedBy, 'Megan');
+  await run(at(e.schedule[1].due));
+  assert.equal(chargesFor(id), 0);
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Marked paid outside Stripe.*Wise 123/);
+  assert.equal((await svc('payment-mark-paid', { id, item: 1, by: 'Megan' })).status, 409);
+});
+
+await t('student portal: plan by deal for the student or a parent only; a fresh link on request', async () => {
+  const { id, deal } = await enrolled('portal@x.org');
+  const get = async (q) => (await (await service(new Request(`https://apply.example.org/api/service/plan?${q}`, { headers: { 'x-apply-key': 'svc' } }))).json());
+  const mine = await get(`dealId=${deal}&email=portal@x.org`);
+  assert.equal(mine.plan.plan, 'monthly'); assert.equal(mine.plan.schedule.length, 9);
+  assert.equal(mine.plan.remaining, 13000); assert.equal(mine.plan.next.amount, 1625); assert.equal(mine.plan.automatic, true);
+  assert.equal((await get(`dealId=${deal}&email=PARENT.portal@x.org`)).plan.plan, 'monthly', 'a parent, any case');
+  assert.equal((await get(`dealId=${deal}&email=someone@else.org`)).plan, null);
+  assert.equal((await get(`dealId=999&email=portal@x.org`)).plan, null);
+  const link = await svc('plan-link', { dealId: deal, email: 'portal@x.org' });
+  assert.match(link.body.url, /^https:\/\/apply\.example\.org\/accept\?token=[\w-]+$/);
+  const tok = link.body.url.split('token=')[1];
+  assert.equal((await api(`offer?token=${tok}`)).body.offer.state, 'enrolled');
+  assert.equal((await svc('plan-link', { dealId: deal, email: 'x@y.org' })).status, 404);
+  const noKey = await service(new Request(`https://apply.example.org/api/service/plan?dealId=${deal}&email=portal@x.org`));
+  assert.equal(noKey.status, 403);
+});
+
 up.restore();
 await pool.end();
 console.log(`payments: ${n} passed`);

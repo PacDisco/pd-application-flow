@@ -351,6 +351,9 @@ The personal link opens `public/accept.html`. Needs pd-dashboard's `MIGRATION-en
 - **Withdraw** (dashboard, after a deposit): upcoming payments cancelled, what's been paid kept, deal → *Cancelled*, note with the amounts. The family isn't emailed.
 - Safety: each charge and email is claimed in the database first (two runs, the return page and the webhook can't double up); charges use Stripe idempotency keys; a missed run never sends a burst of old notices; at most 40 actions per run. Automatic charging can be switched off in the dashboard, or paused for one family.
 - All family emails are editable in the dashboard, go to the student and parents, and are logged in HubSpot with the personal link removed.
+- **Pay early:** the acceptance page offers "everything remaining" in one checkout (one receipt, one `payment_N`); the automatic payments it covers stop. Starting a checkout again closes the unfinished one at Stripe, so a family can't pay twice.
+- **Paid another way** (bank transfer): admissions clicks *Mark paid* on that payment in the dashboard — it's recorded (with the reference) and never charged.
+- **Student portal:** `GET /api/service/plan?dealId=&email=` (only for the student or a parent on the application) and `POST /api/service/plan-link { dealId, email }` (a fresh personal link to the acceptance page). The portal shows the plan and sends families here to manage it.
 
 ### HubSpot stages (PD program pipelines)
 

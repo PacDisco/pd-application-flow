@@ -28,7 +28,7 @@ import * as R from "./routing.mjs";
 import * as K from "../../../public/form-kit.mjs";
 import * as P from "../../../public/plans-kit.mjs";
 import * as TK from "../../../public/terms-kit.mjs";
-import { chargeSaved, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
+import { chargeSaved, expireCheckout, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
 import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { acceptLink } from "./enrol.mjs";
@@ -225,13 +225,14 @@ export const reasonText = (code) => REASONS[code] || "your bank declined it";
 // ── outcomes ───────────────────────────────────────────────────────────────
 
 /** Mark an item paid (once) → HubSpot payment_N + note, receipt email. */
-export async function itemPaid(appId, idx, info, schema, { from, log = console } = {}) {
+export async function itemPaid(appId, idx, info, schema, { from, log = console, quiet = false } = {}) {
   const paidAt = new Date().toISOString();
   const e = await updateItem(appId, idx, from, {
     status: "paid", paidAt, reference: info.reference, fee: info.fee ?? 0, total: info.total ?? info.amount, method: info.method,
-    lastError: null, nextAttemptAt: null, payingUntil: null,
+    lastError: null, nextAttemptAt: null, payingUntil: null, ...(info.by ? { markedBy: info.by } : {}),
   });
   if (!e) return false;
+  if (quiet) return e;
   const app = await A.byId(appId);
   const item = e.schedule[idx];
   await hubspotPayment(app, item.amount, info.reference, paidAt, log);
@@ -452,14 +453,24 @@ export async function paymentIntentEvent(type, pi, schema, { log = console } = {
 
 // ── from the acceptance page ───────────────────────────────────────────────
 
+/** Close any unfinished checkout for these items; refuse if one was completed. */
+async function closeOpenCheckouts(items, now) {
+  const ids = [...new Set(items.filter((p) => p.checkoutSession && p.payingUntil && new Date(p.payingUntil) > now).map((p) => p.checkoutSession))];
+  for (const id of ids) {
+    if (!(await expireCheckout(id))) throw bad("A payment for this is already going through. Please check back in a few minutes.", 409);
+  }
+}
+
 /** Pay one open item now (balance, or a failed instalment). Returns { url }. */
 export async function startItemCheckout(app, { index, method, token }, schema, now = new Date()) {
   const { enrolment: e } = await readEnrolment(app.id);
   if (e.withdrawn) throw bad("This place has been cancelled. Please contact admissions.", 409);
+  if (index === "rest") return startRestCheckout(app, e, { method, token }, schema, now);
   const idx = Number(index);
   const item = e.schedule?.[idx];
   if (!item || !PAYABLE.includes(item.status)) throw bad("That payment isn't open to pay now.", 409);
   if (!["card", "ach"].includes(method)) throw bad("Choose card or bank account.");
+  await closeOpenCheckouts(openRest(e), now);
   const rate = rateFor(e, schema, method);
   const fee = P.surcharge(item.amount, rate);
   const program = app.program || "Pacific Discovery";
@@ -482,10 +493,75 @@ export async function startItemCheckout(app, { index, method, token }, schema, n
   return { url: session.url };
 }
 
+/** Pay off everything left in one go (cancels the automatic payments it covers). */
+async function startRestCheckout(app, e, { method, token }, schema, now) {
+  if (!["paid"].includes(e.deposit?.status)) throw bad("Your deposit hasn't cleared yet.", 409);
+  if (!["card", "ach"].includes(method)) throw bad("Choose card or bank account.");
+  const items = openRest(e);
+  if (!items.length) throw bad("There's nothing left to pay.", 409);
+  await closeOpenCheckouts(items, now);
+  const amount = Math.round(items.reduce((a, p) => a + p.amount * 100, 0)) / 100;
+  const rate = rateFor(e, schema, method);
+  const fee = P.surcharge(amount, rate);
+  const payingUntil = new Date(now.getTime() + 3600e3).toISOString();
+  for (const p of items) {
+    if (!(await updateItem(app.id, p.i, ["scheduled", "failed", "needs_admissions", "due"], { payingUntil }))) throw bad("A payment is in progress — please try again in a few minutes.", 409);
+  }
+  const program = app.program || "Pacific Discovery";
+  const ret = acceptLink(token);
+  const session = await createDepositCheckout({
+    app, currency: String(schema?.settings?.currency || "usd").toLowerCase(), method,
+    lines: [[`Remaining tuition — ${program}`, amount], [`${method === "ach" ? "Bank payment" : "Card processing"} fee (${(rate * 100).toFixed(1).replace(/\.0$/, "")}%)`, fee]],
+    save: false,
+    successUrl: `${ret}&paid=1&session_id={CHECKOUT_SESSION_ID}`,
+    cancelUrl: `${ret}&cancelled=1`,
+    description: `Remaining tuition — ${program} — ${app.first_name || ""} ${app.last_name || ""}`.trim(),
+    metadata: { payment_kind: "item", items: items.map((p) => p.i).join(","), method, base_amount: amount, processing_fee: fee, ...(app.hubspot_deal_id ? { deal_id: app.hubspot_deal_id } : {}) },
+    expiresAt: Math.floor(now.getTime() / 1000) + 3600,
+  });
+  for (const p of items) await updateItem(app.id, p.i, ["scheduled", "failed", "needs_admissions", "due"], { checkoutSession: session.id });
+  return { url: session.url };
+}
+const openRest = (e) => (e.schedule || []).map((p, idx) => ({ ...p, i: idx })).filter((p) => p.i > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status));
+
+/** Several items paid by one checkout: each marked paid, one HubSpot entry, one receipt. */
+async function recordRest(session, schema, idxs, status, log) {
+  const m = session.metadata || {};
+  const appId = session.client_reference_id;
+  const { enrolment: e } = await readEnrolment(appId);
+  const mine = idxs.filter((i) => e.schedule?.[i]?.checkoutSession === session.id);
+  if (!mine.length) return { ignored: true };
+  const OPENISH = ["scheduled", "failed", "needs_admissions", "due"];
+  if (status === "processing") {
+    for (const i of mine) await updateItem(appId, i, OPENISH, { status: "processing", paymentIntent: session.payment_intent, method: m.method });
+    return { processing: true };
+  }
+  const reference = session.payment_intent || session.id;
+  const total = (session.amount_total || 0) / 100;
+  let last = null;
+  for (const i of mine) {
+    const r = await itemPaid(appId, i, { reference, amount: e.schedule[i].amount, fee: 0, total: e.schedule[i].amount, method: m.method }, schema, { from: [...OPENISH, "processing"], log, quiet: true });
+    if (r) last = r;
+  }
+  if (!last) return { ignored: true };
+  const app = await A.byId(appId);
+  await hubspotPayment(app, Number(m.base_amount), reference, new Date().toISOString(), log);
+  await note(app, `<p><strong>Remaining tuition paid in full</strong> — ${usd(total)} by ${methodName(m.method)} (${esc(reference)}), covering ${mine.length} payment${mine.length === 1 ? "" : "s"}.</p>`, log);
+  try { await familyEmail(app, schema, "paymentReceived", { amount: usd(total), balanceLine: balanceLine(last.schedule) }, { log }); }
+  catch (err) { log.error?.("[payments rest receipt]", err.message); }
+  return { paid: mine.length };
+}
+
 /** A pay-now checkout finished (return page or webhook). */
 export async function recordItemCheckout(session, schema, { log = console } = {}) {
   const m = session.metadata || {};
   const appId = session.client_reference_id;
+  if (m.items) {
+    const idxs = String(m.items).split(",").map(Number).filter(Number.isInteger);
+    if (session.payment_status === "paid") return recordRest(session, schema, idxs, "paid", log);
+    if (session.status === "complete") return recordRest(session, schema, idxs, "processing", log);
+    return { ignored: true };
+  }
   const idx = Number(m.item);
   const { enrolment: e } = await readEnrolment(appId);
   const item = e.schedule?.[idx];
@@ -498,8 +574,20 @@ export async function recordItemCheckout(session, schema, { log = console } = {}
 
 /** A bank pay-now payment bounced: open again. */
 export async function itemCheckoutFailed(session, schema, { log = console } = {}) {
-  const idx = Number(session.metadata?.item);
   const appId = session.client_reference_id;
+  if (session.metadata?.items) {
+    const { enrolment: e } = await readEnrolment(appId);
+    let n = 0;
+    for (const i of String(session.metadata.items).split(",").map(Number)) {
+      const p = e.schedule?.[i];
+      if (p?.checkoutSession !== session.id) continue;
+      // back to how it was: automatic ones are tried again on the next run
+      if (await updateItem(appId, i, ["processing"], { status: p.manual ? "due" : "failed", nextAttemptAt: new Date().toISOString(), payingUntil: null, lastError: { reason: "bank_payment_failed", at: new Date().toISOString() } })) n++;
+    }
+    if (n) await note(await A.byId(appId), "<p><strong>Bank payment failed</strong> for the remaining tuition. Automatic payments carry on as scheduled.</p>", log);
+    return { failed: n };
+  }
+  const idx = Number(session.metadata?.item);
   const { enrolment: e } = await readEnrolment(appId);
   const item = e.schedule?.[idx];
   if (!item || item.checkoutSession !== session.id) return { ignored: true };
@@ -599,6 +687,51 @@ export async function withdraw(appId, { by = "admissions", reason = "" } = {}, {
   }
   await note(app, `<p><strong>Withdrew</strong> (recorded by ${esc(by)}).${reason ? ` Reason: ${esc(reason)}.` : ""} Kept per the terms: ${usd(kept)} paid to date. Cancelled ${cancelled} upcoming payment${cancelled === 1 ? "" : "s"} (${usd(cancelledAmount)}).${inFlight ? ` ${inFlight} payment${inFlight === 1 ? " is" : "s are"} still clearing — check Stripe.` : ""}</p>`, log);
   return { withdrawn: true, kept, cancelled, cancelledAmount, inFlight, stage };
+}
+
+/** Admissions: paid outside Stripe (e.g. a bank transfer) — mark it so it isn't charged too. */
+export async function markPaidOutside(appId, idx, { by = "admissions", reference = "" } = {}, schema) {
+  const ref = String(reference || "").trim().slice(0, 120) || `manual-${new Date().toISOString().slice(0, 10)}`;
+  const e = await itemPaid(appId, Number(idx), { reference: ref, method: "manual", by }, schema, { from: ["scheduled", "failed", "needs_admissions", "due"], quiet: true });
+  if (!e) throw bad("That payment isn't open.", 409);
+  const app = await A.byId(appId);
+  await note(app, `<p><strong>Marked paid outside Stripe</strong> by ${esc(by)} — ${usd(e.schedule[idx].amount)} due ${esc(e.schedule[idx].due)} (${esc(ref)}). It won't be charged automatically.</p>`);
+  return e.schedule[idx];
+}
+
+/** The application behind a HubSpot deal, if `email` is the student or a parent on it. */
+export async function appForPortal({ dealId, email }) {
+  const em = String(email || "").trim().toLowerCase();
+  if (!dealId || !em) return null;
+  const rows = await db().query(`SELECT ${A.COLS}, enrolment, decision FROM applications WHERE hubspot_deal_id = $1 ORDER BY created_at DESC`, [String(dealId)]);
+  const { familyRecipients } = await import("./notify.mjs");
+  return rows.find((a) => familyRecipients(a).includes(em)) || null;
+}
+
+/** What the student portal shows about the payment plan. Pure (tested). */
+export function portalPlan(app) {
+  const e = app?.enrolment || {};
+  if (!e.deposit || !["paid", "processing"].includes(e.deposit.status)) return null;
+  const sched = (e.schedule || []).map((p, i) => ({ index: i, due: p.due, amount: p.amount, kind: p.kind, manual: !!p.manual, status: p.status, paidAt: p.paidAt || null, total: p.total ?? null }));
+  const open = sched.filter((p) => p.index > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status));
+  const next = open.filter((p) => p.status === "scheduled" || p.status === "due").sort((a, b) => a.due.localeCompare(b.due))[0] || null;
+  return {
+    plan: e.choice?.plan || null,
+    planName: { monthly: "Monthly payments", two: "Two instalments", full: "Paid in full", later: "Deposit now, balance later" }[e.choice?.plan] || "",
+    method: e.choice?.method === "ach" ? "ach" : "card",
+    schedule: sched,
+    remaining: Math.round(open.reduce((a, p) => a + p.amount * 100, 0)) / 100,
+    next,
+    needsAction: open.some((p) => ["failed", "needs_admissions"].includes(p.status)),
+    automatic: open.some((p) => !p.manual),
+    paused: !!e.paused,
+    withdrawn: !!e.withdrawn,
+  };
+}
+
+/** A fresh personal link to the acceptance page (the portal's "manage" button). */
+export async function portalLink(app) {
+  return acceptLink(await A.addLinkToken(app.id));
 }
 
 /** Admissions: try a failed payment again on the next run. */

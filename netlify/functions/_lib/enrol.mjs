@@ -100,6 +100,10 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
       // what they'd be charged: the rate they agreed to for their method, today's for the other
       rates: { ...K.surchargeRates(schema), ...(enrolment.choice?.rate != null ? { [enrolment.choice.method === "ach" ? "ach" : "card"]: Number(enrolment.choice.rate) } : {}) },
       withdrawn: !!enrolment.withdrawn,
+      // pay off everything left in one go
+      rest: enrolment.deposit.status === "paid" && !enrolment.withdrawn
+        ? Math.round((enrolment.schedule || []).filter((p, i) => i > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status)).reduce((a, p) => a + p.amount * 100, 0)) / 100
+        : 0,
       // can change the saved card / bank account while automatic payments remain
       canUpdateMethod: !enrolment.withdrawn && (enrolment.schedule || []).some((p) => !p.manual && ["scheduled", "failed", "needs_admissions"].includes(p.status)),
     };
