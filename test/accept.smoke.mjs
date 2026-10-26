@@ -71,6 +71,18 @@ try {
     assert.match(await page.textContent('h1'), /confirmed/);
     assert.match(await page.textContent('.sched'), /paid/);
     await shot('3-confirmed');
+    // a payment that didn't go through: pay it from the page, or change the card
+    const appId = (await pool.query(`SELECT id FROM applications WHERE email = $1`, [`ui.${tag}@x.org`])).rows[0].id;
+    await pool.query(`UPDATE applications SET enrolment = jsonb_set(enrolment, '{schedule,1}', (enrolment->'schedule'->1) || '{"status":"needs_admissions","attempts":3}') WHERE id = $1`, [appId]);
+    await page.goto(`http://localhost:8898/accept?token=${token}`);
+    await page.waitForSelector('[data-pay="1"]');
+    assert.match(await page.textContent('[data-pay="1"]'), /Pay \$1,625 /, 'their bank account by default (no fee)');
+    assert.ok(await page.isVisible('#upd'));
+    await page.check('input[name=pm][value=card]');
+    assert.match(await page.textContent('[data-pay="1"]'), /Pay \$1,681\.88/);
+    await shot('4-payment-needed');
+    await Promise.all([page.waitForURL(/checkout\.stripe\.com/), page.click('[data-pay="1"]')]);
+    assert.equal([...up.stripe.sessions.values()].at(-1).metadata.payment_kind, 'item');
     assert.deepEqual(errors, []);
     await page.close();
     console.log(`  ✓ ${tag}: offer → choose plan + method → Stripe → confirmed`);

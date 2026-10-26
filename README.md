@@ -72,7 +72,7 @@ The stage is the pipeline's "Application Fee Received" (or "…Paid") stage. `pd
    | `HUBSPOT_APPLICATION_PIPELINE` | optional; the application pipeline's name or ID, default `PD Applications` |
 
 4. **Domain:** add `apply.pacificdiscovery.org` to the site.
-5. **Stripe webhook:** Developers → Webhooks → Add endpoint `https://apply.pacificdiscovery.org/api/stripe-webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded` and `checkout.session.async_payment_failed` (bank deposits that bounce). Copy the signing secret into `STRIPE_WEBHOOK_SECRET`. Other Stripe sessions (the student portal's) are ignored.
+5. **Stripe webhook:** Developers → Webhooks → Add endpoint `https://apply.pacificdiscovery.org/api/stripe-webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded` and `checkout.session.async_payment_failed` (bank payments that bounce), `payment_intent.succeeded` and `payment_intent.payment_failed` (automatic instalments). Copy the signing secret into `STRIPE_WEBHOOK_SECRET`. Other Stripe sessions (the student portal's) are ignored.
 6. **Dashboard:** deploy pd-dashboard, set `APPLY_SITE_URL` + `APPLY_SERVICE_KEY` there, open **Apply Form**. The form seeds itself from the live Jotform forms. Check the Programs tab (Japan Summer Program has no price on the current Jotform, and PD Program values need picking), then **Publish**.
 7. **Portals:** set `APPLY_SERVICE_URL=https://apply.pacificdiscovery.org` and `APPLY_SERVICE_KEY` on the student and instructor portal sites, then deploy them.
 8. **Website:** point the "Apply" buttons at `https://apply.pacificdiscovery.org`. UTM/gclid/fbclid parameters on that link are captured. To embed it in a page instead:
@@ -342,7 +342,15 @@ The personal link opens `public/accept.html`. Needs pd-dashboard's `MIGRATION-en
 - Paid (return page or webhook, whichever is first — recorded once): schedule stored, deal → **Deposit Paid/Customer**, `payment_N` filled, note with the plan, the editable *place confirmed* email to student + parents (logged in HubSpot) with the schedule and the student-portal link, and an admissions alert. A bank payment shows as *clearing* and is confirmed when Stripe says the money arrived; if it bounces, the page offers the payment again and a HubSpot note is added.
 - After the hold passes the page says so and won't take payment until admissions extends it. The link itself never expires.
 
-**Not in this release (4b — must be live before the first instalment is due, about a month after the first deposit):** the daily job that charges the saved card / bank account, the 3-day notice emails, retries and the admissions hand-off on a failed payment, deposit-unpaid reminders, and withdrawals (→ *Cancelled*, keep what's been paid).
+## Payments after the deposit (`_lib/payments.mjs`, hourly `enrol-payments.mjs`)
+
+- **Automatic instalments** are charged on their due date (admissions' time zone, `INTERVIEW_TZ`, default America/Denver) to the saved card / bank account, plus the fee for that method. The family is emailed 3 days before and gets a receipt after; each payment fills the next `payment_N` on the deal with a note. Bank payments clear through the `payment_intent.*` webhook.
+- **Failed payment:** family emailed (pay now or change card/account from their link), tried again after 3 days and 4 more; after the third failure admissions is emailed and it stops until admissions clicks **Retry** in the dashboard. Saving a new card / account from the page retries failed payments on the next run.
+- **Balance later:** reminders 14 and 3 days before it's due; admissions told if it's overdue. Never charged automatically — they pay from the page.
+- **Deposit not paid:** reminders when 5, 2 and 1 days are left on the hold; admissions emailed (and a HubSpot note) when it passes. Extending the hold restarts them.
+- **Withdraw** (dashboard, after a deposit): upcoming payments cancelled, what's been paid kept, deal → *Cancelled*, note with the amounts. The family isn't emailed.
+- Safety: each charge and email is claimed in the database first (two runs, the return page and the webhook can't double up); charges use Stripe idempotency keys; a missed run never sends a burst of old notices; at most 40 actions per run. Automatic charging can be switched off in the dashboard, or paused for one family.
+- All family emails are editable in the dashboard, go to the student and parents, and are logged in HubSpot with the personal link removed.
 
 ### HubSpot stages (PD program pipelines)
 

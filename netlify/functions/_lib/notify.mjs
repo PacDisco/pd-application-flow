@@ -455,3 +455,54 @@ export async function sendDepositAlert(app, enrolment) {
   });
   return to;
 }
+
+// ── payments after the deposit (stage 4b) ──────────────────────────────────
+
+export { usd as formatUsd };
+
+/**
+ * Any editable family email by template key, with the standard layout.
+ * `vars` fill the placeholders; firstName / program / term are added.
+ * Pure (tested). Advisor block off for payment notices unless `advisor`.
+ */
+export function familyMessage(app, schema, key, vars = {}, { terms = null, advisor = false } = {}) {
+  const tpl = TK.emailTemplate(schema, key);
+  const all = {
+    firstName: app.answers?.preferredName || app.first_name || "there",
+    program: app.program || "your Pacific Discovery program",
+    term: app.term || "",
+    ...vars,
+  };
+  const body = TK.fillTemplate(tpl.body, all).replace(/\s*\(\s*\)/g, "").replace(/\n{3,}/g, "\n\n");
+  const subject = TK.fillTemplate(tpl.subject, all).replace(/\s*\(\s*\)/g, "");
+  const adv = advisor ? TK.advisorBlock(schema) : null;
+  return { subject, text: familyEmailText(body, terms, adv), html: familyEmailHtml(body, terms, adv), enabled: tpl.enabled };
+}
+
+export async function sendFamily(app, schema, key, vars, opts) {
+  const to = familyRecipients(app);
+  if (!to.length) throw new Error("No valid recipient email");
+  const { subject, text, html } = familyMessage(app, schema, key, vars, opts);
+  const { from, replyTo } = applicantFrom();
+  await transport().sendMail({ from, to: to.join(", "), replyTo, subject, text, html });
+  return { to, from, subject, text, html };
+}
+
+/** A plain alert to admissions@ about one applicant. */
+export async function sendAdmissionsAlert(app, subject, lines) {
+  const to = alertRecipients();
+  if (!to.length) return [];
+  const name = `${app.first_name || ""} ${app.last_name || ""}`.trim() || app.email;
+  const links = [];
+  if (app.hubspot_deal_id) links.push(["Open deal in HubSpot", `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/record/0-3/${app.hubspot_deal_id}`]);
+  links.push(["Applications dashboard", `${(process.env.DASHBOARD_URL || "https://dashboard.pacificdiscovery.org").replace(/\/+$/, "")}/apply-form/`]);
+  const full = `${subject}: ${name}${app.program ? ` — ${app.program}` : ""}${app.term ? ` (${app.term})` : ""}`;
+  const text = [...lines, "", ...links.map(([k, u]) => `${k}: ${u}`)].join("\n");
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#2f2f2f;max-width:620px">${lines.map((l) => `<p style="margin:0 0 8px">${esc(l)}</p>`).join("")}
+  <p>${links.map(([k, u]) => `<a href="${esc(u)}" style="color:#288195;margin-right:16px">${esc(k)}</a>`).join("")}</p></div>`;
+  await transport().sendMail({
+    from: `"${process.env.SMTP_FROM_NAME || "Pacific Discovery Applications"}" <${process.env.SMTP_USER}>`,
+    to: to.join(", "), replyTo: app.email, subject: full, text, html,
+  });
+  return to;
+}

@@ -9,6 +9,9 @@
 //   POST /api/service/decision { id, outcome: "accepted"|"declined", by, message?, refund? }
 //                                             admissions decision (dashboard) — see _lib/decisions.mjs
 //   POST /api/service/extend-hold { id, days?, by }  hold an accepted place longer
+//   POST /api/service/withdraw { id, by, reason }    withdrew after the deposit: cancel future payments, deal → Cancelled
+//   POST /api/service/payment-retry { id, item, by } try a failed payment again on the next run
+//   POST /api/service/payments-pause { id, paused, by }
 
 import { db, publishedSchema } from "./_lib/db.mjs";
 import { serviceOk, json, errorResponse, fileUrl } from "./_lib/http.mjs";
@@ -16,6 +19,7 @@ import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
 import { decide, extendHold } from "./_lib/decisions.mjs";
+import * as PAY from "./_lib/payments.mjs";
 
 export const config = { path: ["/api/service/*"] };
 
@@ -70,6 +74,19 @@ export default async (req) => {
         sync = sync - 'hsError' - 'hsPaidError' - 'hsInterviewError' WHERE id = ${id}`;
       const result = await A.syncApplication(id, { schema });
       return json({ ok: true, result, app: await A.byId(id) });
+    }
+    if (req.method === "POST" && route === "withdraw") {
+      const b = await req.json();
+      return json({ ok: true, ...(await PAY.withdraw(String(b.id || ""), { by: b.by, reason: b.reason })) });
+    }
+    if (req.method === "POST" && route === "payment-retry") {
+      const b = await req.json();
+      return json({ ok: true, item: await PAY.retryItem(String(b.id || ""), Number(b.item), { by: b.by }) });
+    }
+    if (req.method === "POST" && route === "payments-pause") {
+      const b = await req.json();
+      await PAY.setPaused(String(b.id || ""), !!b.paused, { by: b.by });
+      return json({ ok: true });
     }
     if (req.method === "POST" && route === "extend-hold") {
       const b = await req.json();

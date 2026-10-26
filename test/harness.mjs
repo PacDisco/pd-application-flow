@@ -194,7 +194,7 @@ export function fakeUpstreams({ pdOptions } = {}) {
         const amount = [0, 1].reduce((acc, i) => acc + Number(f.get(`line_items[${i}][price_data][unit_amount]`) || 0), 0);
         const meta = {};
         for (const [k, v] of f) { const mm = /^metadata\[(\w+)\]$/.exec(k); if (mm) meta[mm[1]] = v; }
-        const s = { id, url: `https://checkout.stripe.com/c/pay/${id}`, client_reference_id: f.get('client_reference_id'), amount_total: amount, currency: 'usd', metadata: meta, payment_status: 'unpaid', status: 'open', customer: f.get('customer'), payment_intent: `pi_${id}`, created: Math.floor(Date.now() / 1000), success_url: f.get('success_url'), form: f };
+        const s = { id, mode: f.get('mode'), url: `https://checkout.stripe.com/c/pay/${id}`, client_reference_id: f.get('client_reference_id'), amount_total: amount, currency: 'usd', metadata: meta, payment_status: 'unpaid', status: 'open', customer: f.get('customer'), payment_intent: `pi_${id}`, created: Math.floor(Date.now() / 1000), success_url: f.get('success_url'), form: f };
         stripe.sessions.set(id, s);
         return J(s);
       }
@@ -210,6 +210,26 @@ export function fakeUpstreams({ pdOptions } = {}) {
         return J(refund);
       }
       let m;
+      if (p === '/v1/payment_intents' && method === 'POST') {
+        // Off-session charge. stripe.chargeOutcome: 'succeeded' (default) | 'processing' | 'decline' | 'insufficient_funds'
+        const f = new URLSearchParams(body);
+        const key = init.headers?.['Idempotency-Key'] || null;
+        stripe.charges = stripe.charges || [];
+        const prev = key && stripe.charges.find((c) => c.key === key);
+        if (prev) return prev.status === 402 ? J(prev.res, 402) : J(prev.res);
+        const meta = {};
+        for (const [k, v] of f) { const mm = /^metadata\[(\w+)\]$/.exec(k); if (mm) meta[mm[1]] = v; }
+        const id = `pi_inst_${stripe.charges.length + 1}`;
+        const outcome = stripe.chargeOutcome || 'succeeded';
+        let res; let status = 200;
+        if (outcome === 'decline' || outcome === 'insufficient_funds') {
+          status = 402;
+          res = { error: { type: 'card_error', code: 'card_declined', decline_code: outcome === 'decline' ? 'generic_decline' : 'insufficient_funds', message: 'Your card was declined.', payment_intent: { id, status: 'requires_payment_method' } } };
+        } else res = { id, object: 'payment_intent', status: outcome, amount: Number(f.get('amount')), amount_received: outcome === 'succeeded' ? Number(f.get('amount')) : 0, metadata: meta };
+        stripe.charges.push({ key, form: f, meta, res, status, id });
+        return J(res, status);
+      }
+      if ((m = /^\/v1\/setup_intents\/([^/?]+)/.exec(p))) return J({ id: m[1], payment_method: { id: stripe.setupPm || 'pm_new', type: stripe.setupPmType || 'card' } });
       if ((m = /^\/v1\/payment_intents\/(.+)$/.exec(p))) return J({ id: m[1], object: 'payment_intent', payment_method: `pm_${m[1]}` });
       if ((m = /^\/v1\/checkout\/sessions\/(.+)$/.exec(p))) return J(stripe.sessions.get(m[1]) || {}, stripe.sessions.has(m[1]) ? 200 : 404);
       return J({ error: { message: 'fake stripe unhandled' } }, 404);

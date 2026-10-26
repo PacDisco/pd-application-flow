@@ -93,8 +93,15 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
     return {
       ...base, state: "enrolled", processing: enrolment.deposit.status === "processing",
       plan: enrolment.choice?.plan, planName: PLAN_LABEL[enrolment.choice?.plan] || "", method: enrolment.choice?.method,
-      schedule: enrolment.schedule || [], deposit: enrolment.deposit, start: enrolment.offer?.start,
+      schedule: (enrolment.schedule || []).map((p) => ({ due: p.due, amount: p.amount, kind: p.kind, manual: !!p.manual, status: p.status, total: p.total ?? null, paidAt: p.paidAt || null })),
+      deposit: { status: enrolment.deposit.status, total: enrolment.deposit.total, method: enrolment.deposit.method },
+      start: enrolment.offer?.start,
       termsVersion: enrolment.choice?.termsVersion || null,
+      // what they'd be charged: the rate they agreed to for their method, today's for the other
+      rates: { ...K.surchargeRates(schema), ...(enrolment.choice?.rate != null ? { [enrolment.choice.method === "ach" ? "ach" : "card"]: Number(enrolment.choice.rate) } : {}) },
+      withdrawn: !!enrolment.withdrawn,
+      // can change the saved card / bank account while automatic payments remain
+      canUpdateMethod: !enrolment.withdrawn && (enrolment.schedule || []).some((p) => !p.manual && ["scheduled", "failed", "needs_admissions"].includes(p.status)),
     };
   }
   if (decision?.outcome !== "accepted" || !enrolment.offer) return { ...base, state: "none" };
@@ -176,7 +183,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
     reference: session.payment_intent || session.id, sessionId: session.id, status, paidAt: new Date().toISOString(),
   };
   const patch = {
-    choice: { plan: choice.plan, method: choice.method, termsVersion: choice.termsVersion, agreedAt: choice.agreedAt },
+    choice: { plan: choice.plan, method: choice.method, rate: choice.rate ?? null, termsVersion: choice.termsVersion, agreedAt: choice.agreedAt },
     deposit, schedule, stripe: { customer: session.customer || null, paymentMethod: paymentMethod ? (paymentMethod.id || String(paymentMethod)) : null },
     pending: null, lastPending: choice,
   };

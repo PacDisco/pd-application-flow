@@ -19,10 +19,11 @@ let token = url.searchParams.get('token');
 try { if (token) sessionStorage.setItem(TOKEN_KEY, token); else token = sessionStorage.getItem(TOKEN_KEY); } catch { /* private mode */ }
 const sessionId = url.searchParams.get('session_id');
 const cancelled = url.searchParams.has('cancelled');
+const updated = url.searchParams.has('updated');
 // Keep the link out of the address bar (and out of screenshots / history).
 history.replaceState(null, '', '/accept');
 
-const S = { offer: null, plan: null, method: 'card', agree: false };
+const S = { offer: null, plan: null, method: 'card', agree: false, payMethod: null };
 
 function say(kind, html) { $('#banner').innerHTML = html ? `<div class="banner banner--${kind}">${html}</div>` : ''; }
 
@@ -35,6 +36,8 @@ async function load() {
   S.offer = data.offer;
   if (cancelled && S.offer.state === 'offer') say('info', 'Payment was cancelled — nothing has been charged. You can try again below.');
   if (sessionId && S.offer.state === 'offer') say('info', "We haven't had confirmation from the payment provider yet. If you completed payment, this page will update shortly.");
+  if (cancelled && S.offer.state === 'enrolled') say('info', 'Nothing was changed or charged.');
+  if (updated && S.offer.state === 'enrolled') say('ok', 'Thanks — your new payment method is saved and will be used for your upcoming payments.');
   render();
 }
 
@@ -133,19 +136,54 @@ async function pay(e) {
   }
 }
 
+const STATUS = { paid: 'paid', scheduled: 'automatic', due: 'to pay', processing: 'processing', charging: 'processing', failed: 'didn\'t go through', needs_admissions: 'didn\'t go through', cancelled: 'cancelled' };
+const PAYABLE = ['failed', 'needs_admissions', 'due'];
+
 function renderEnrolled(o) {
+  if (!S.payMethod) S.payMethod = o.method === 'ach' ? 'ach' : 'card';
+  const payable = (o.schedule || []).map((p, i) => ({ ...p, i })).filter((p) => PAYABLE.includes(p.status));
   const rows = (o.schedule || []).map((p, i) => `<tr><td>${i === 0 ? 'Paid' : esc(dateS(p.due))}${p.manual ? ' <span class="small">(you pay by this date)</span>' : ''}</td>
-    <td>${money(p.amount)} <span class="st st--${esc(p.status)}">${esc({ paid: 'paid', scheduled: 'automatic', due: 'to pay', processing: 'processing' }[p.status] || p.status)}</span></td></tr>`).join('');
-  $('#view').innerHTML = `<section class="card">
+    <td>${money(p.amount)} <span class="st st--${esc(p.status)}">${esc(STATUS[p.status] || p.status)}</span></td></tr>`).join('');
+  const rate = o.rates?.[S.payMethod] || 0;
+  const payBox = !o.withdrawn && payable.length ? `<section class="card"><h2 class="serif">${payable.some((p) => !p.manual) ? 'Payment needed' : 'Pay your balance'}</h2>
+    <p class="lead" style="margin-bottom:12px">${payable.some((p) => !p.manual) ? 'A payment didn\'t go through. You can pay it now:' : 'Pay any time before the due date.'}</p>
+    <div class="methods" role="radiogroup" aria-label="Pay with">
+      <label class="opt" data-on="${S.payMethod === 'card'}"><input type="radio" name="pm" value="card"${S.payMethod === 'card' ? ' checked' : ''}><span><span class="t">Card</span><span class="d" style="display:block">${o.rates?.card ? `${pct(o.rates.card)} processing fee` : 'No fee'}</span></span></label>
+      <label class="opt" data-on="${S.payMethod === 'ach'}"><input type="radio" name="pm" value="ach"${S.payMethod === 'ach' ? ' checked' : ''}><span><span class="t">US bank account</span><span class="d" style="display:block">${o.rates?.ach ? `${pct(o.rates.ach)} fee` : 'No fee'} · takes a few days to clear</span></span></label>
+    </div>
+    ${payable.map((p) => { const total = Math.round((p.amount + Math.round(p.amount * rate * 100) / 100) * 100) / 100; return `<div class="pay" style="margin-top:8px"><span>${p.manual ? 'Tuition balance' : `Payment due ${esc(dateL(p.due))}`}: <strong>${money(p.amount)}</strong></span>
+      <button class="btn btn--go" type="button" data-pay="${p.i}">Pay ${money(total)} →</button></div>`; }).join('')}
+  </section>` : '';
+  $('#view').innerHTML = `${payBox}<section class="card">
     <div class="tick" aria-hidden="true">✓</div>
-    <h1 class="serif">${o.processing ? 'Payment received — clearing' : 'Your place is confirmed!'}</h1>
-    <p class="lead">${o.processing
-      ? `Your bank payment is on its way — bank payments take a few business days to clear. We'll email you as soon as it does and your place on ${esc(o.program)} is confirmed.`
-      : `You're going on <strong>${esc(o.program)}</strong>${o.start ? `, starting ${esc(dateL(o.start))}` : ''}. We've emailed you and your parents a confirmation with everything below.`}</p>
+    <h1 class="serif">${o.withdrawn ? 'Your place has been cancelled' : o.processing ? 'Payment received — clearing' : 'Your place is confirmed!'}</h1>
+    <p class="lead">${o.withdrawn
+      ? 'Your upcoming payments have been cancelled. If you have any questions, please contact <a href="mailto:admissions@pacificdiscovery.org">admissions@pacificdiscovery.org</a>.'
+      : o.processing
+        ? `Your bank payment is on its way — bank payments take a few business days to clear. We'll email you as soon as it does and your place on ${esc(o.program)} is confirmed.`
+        : `You're going on <strong>${esc(o.program)}</strong>${o.start ? `, starting ${esc(dateL(o.start))}` : ''}. We've emailed you and your parents a confirmation with everything below.`}</p>
     <h2 class="serif">${esc(o.planName || 'Your payments')}</h2>
     <table class="sched">${rows}</table>
+    ${o.canUpdateMethod ? `<p style="margin:14px 0 0"><button class="btn btn--line" type="button" id="upd">Change card or bank account</button> <span class="small">Automatic payments use the ${o.method === 'ach' ? 'bank account' : 'card'} you paid with; we email you 3 days before each one.</span></p>` : ''}
     <p class="small" style="margin-top:14px">Your student portal has your pre-departure information, forms and payments: <a href="https://portal.pacificdiscovery.org/login.html">portal.pacificdiscovery.org</a> — sign in with ${esc(o.email)}.</p>
   </section>${advisorCard(o)}`;
+  document.querySelectorAll('input[name=pm]').forEach((el) => el.addEventListener('change', () => { S.payMethod = el.value; renderEnrolled(o); }));
+  document.querySelectorAll('[data-pay]').forEach((b) => b.addEventListener('click', () => go(b, 'pay-item', { index: Number(b.dataset.pay), method: S.payMethod })));
+  $('#upd')?.addEventListener('click', (e) => go(e.currentTarget, 'update-method', {}));
+}
+
+async function go(btn, route, extra) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Opening secure checkout…';
+  try {
+    const res = await fetch(`/api/accept/${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...extra }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+    location.href = data.url;
+  } catch (err) {
+    say('bad', esc(err.message));
+    btn.disabled = false; btn.textContent = label;
+  }
 }
 
 load().catch(() => say('bad', 'Something went wrong loading your offer. Please refresh.'));

@@ -22,6 +22,7 @@ async function stripe(path, { method = "GET", params, idempotencyKey } = {}) {
   if (!res.ok) {
     const err = new Error(data?.error?.message || `Stripe ${path} → ${res.status}`);
     err.status = 502;
+    err.stripe = data?.error || null; // code, decline_code, payment_intent (off-session declines)
     throw err;
   }
   return data;
@@ -127,7 +128,7 @@ export function methodTypes(method) {
  * or the whole balance). `save` keeps the card / bank account on the Stripe
  * customer for the automatic instalments.
  */
-export async function createDepositCheckout({ app, lines, currency, method, save, successUrl, cancelUrl, metadata, description }) {
+export async function createDepositCheckout({ app, lines, currency, method, save, successUrl, cancelUrl, metadata, description, expiresAt }) {
   const customer = await customerFor(app.email, [app.first_name, app.last_name].filter(Boolean).join(" "));
   const p = new URLSearchParams();
   p.append("mode", "payment");
@@ -144,6 +145,7 @@ export async function createDepositCheckout({ app, lines, currency, method, save
   });
   if (save) p.append("payment_intent_data[setup_future_usage]", "off_session");
   if (method === "ach") p.append("payment_method_options[us_bank_account][verification_method]", "automatic");
+  if (expiresAt) p.append("expires_at", String(expiresAt));
   p.append("success_url", successUrl);
   p.append("cancel_url", cancelUrl);
   const meta = { source: "pd-apply", application_id: app.id, contact_email: app.email, ...metadata };
@@ -157,4 +159,52 @@ export async function createDepositCheckout({ app, lines, currency, method, save
 
 export async function getPaymentIntent(id) {
   return stripe(`/payment_intents/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Charge a saved card / bank account without the customer present (an
+ * instalment). Never throws for a decline: returns the PaymentIntent, or
+ * { status: "failed", error } with Stripe's reason. The idempotency key makes a
+ * retried run return the same attempt instead of charging twice.
+ */
+export async function chargeSaved({ customer, paymentMethod, amount, currency, method, description, metadata, idempotencyKey }) {
+  const p = new URLSearchParams();
+  p.append("amount", String(Math.round(Number(amount) * 100)));
+  p.append("currency", currency);
+  p.append("customer", customer);
+  p.append("payment_method", paymentMethod);
+  for (const t of methodTypes(method)) p.append("payment_method_types[]", t);
+  p.append("off_session", "true");
+  p.append("confirm", "true");
+  if (description) p.append("description", description.slice(0, 300));
+  for (const [k, v] of Object.entries(metadata || {})) p.append(`metadata[${k}]`, String(v ?? "").slice(0, 500));
+  try {
+    return await stripe("/payment_intents", { method: "POST", params: p, idempotencyKey });
+  } catch (err) {
+    if (!err.stripe) throw err; // network / config: the run retries this item later
+    const e = err.stripe;
+    return { id: e.payment_intent?.id || null, status: "failed", error: e.decline_code || e.code || "declined", message: e.message || err.message };
+  }
+}
+
+/** Checkout in setup mode: save a new card / bank account for the instalments. */
+export async function createSetupCheckout({ app, customer, successUrl, cancelUrl, metadata }) {
+  const p = new URLSearchParams();
+  p.append("mode", "setup");
+  p.append("currency", "usd");
+  for (const t of [...methodTypes("card"), ...methodTypes("ach")]) p.append("payment_method_types[]", t);
+  p.append("customer", customer || await customerFor(app.email, [app.first_name, app.last_name].filter(Boolean).join(" ")));
+  p.append("client_reference_id", app.id);
+  p.append("success_url", successUrl);
+  p.append("cancel_url", cancelUrl);
+  const meta = { source: "pd-apply", application_id: app.id, ...metadata };
+  for (const [k, v] of Object.entries(meta)) {
+    p.append(`metadata[${k}]`, String(v ?? "").slice(0, 500));
+    p.append(`setup_intent_data[metadata][${k}]`, String(v ?? "").slice(0, 500));
+  }
+  return stripe("/checkout/sessions", { method: "POST", params: p });
+}
+
+export async function getSetupIntent(id) {
+  return stripe(`/setup_intents/${encodeURIComponent(id)}?expand[]=payment_method`);
 }
