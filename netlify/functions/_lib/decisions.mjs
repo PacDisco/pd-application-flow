@@ -54,12 +54,18 @@ async function writeDecision(id, decision) {
   await db().query(`UPDATE applications SET decision = $2, updated_at = now() WHERE id = $1`, [id, JSON.stringify(decision)]);
 }
 
-async function moveDeal(app, kind) {
+async function moveDeal(app, kind, schema) {
   if (!hubspotOn() || !app.hubspot_deal_id) return null;
   const deal = await HS.getDeal(app.hubspot_deal_id);
   const pipes = await HS.dealPipelines();
   const pipe = pipes.find((p) => p.id === String(deal?.properties?.pipeline));
   const st = R.findStage(pipe, kind);
+  // Accepted before paying the fee: the deal is still in "PD Applications",
+  // which has no such stage — move it into the program's pipeline.
+  if (!st && kind === "accepted") {
+    const moved = await A.moveToProgramPipeline(app, schema, "accepted", deal);
+    if (moved) return moved;
+  }
   const move = st && R.isForward(pipe, deal?.properties?.dealstage, st);
   if (move) await HS.updateDeal(app.hubspot_deal_id, { dealstage: st.id });
   return { pipeline: pipe?.label || null, stage: move ? st.label : null };
@@ -76,7 +82,6 @@ export async function decide(appId, { outcome, by = "admissions", message = "", 
   const app = await A.byId(appId);
   if (!app) throw bad("Application not found.", 404);
   if (app.status === "withdrawn") throw bad("This application is withdrawn. Restore it first.", 409);
-  if (outcome === "accepted" && !app.paid_at) throw bad("The application fee hasn't been paid yet.", 409);
 
   if (!(await claim(app.id))) throw bad("Another decision for this application is being saved. Try again in a moment.", 409);
   try {
@@ -147,9 +152,9 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
   }
   if (hubspotOn()) {
     try {
-      const moved = await moveDeal(app, outcome);
+      const moved = await moveDeal(app, outcome, schema);
       const lines = outcome === "accepted"
-        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. Place held until ${esc(new Date(decision.holdUntil).toDateString())} for the $2,250 deposit. Tuition $${Number(decision.offer.tuition).toLocaleString("en-US")}, starts ${esc(decision.offer.start)}.${decision.email?.to ? " Acceptance email sent." : ""}</p>`]
+        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. Place held until ${esc(new Date(decision.holdUntil).toDateString())} for the $${Number(decision.offer.deposit).toLocaleString("en-US")} deposit${app.paid_at ? "" : " (application fee not paid, so it's included)"}. Tuition $${Number(decision.offer.tuition).toLocaleString("en-US")}, starts ${esc(decision.offer.start)}.${decision.email?.to ? " Acceptance email sent." : ""}</p>`]
         : [`<p><strong>Not accepted</strong> — decided by ${esc(decision.by)}.</p>`,
           decision.refund ? `<p>Application fee refunded: $${(decision.refund.amount / 100).toFixed(2)} (Stripe ${esc(decision.refund.id)}).</p>` : "<p>Application fee not refunded.</p>"];
       if (note) lines.push(`<p>Message to the family: ${esc(note)}</p>`);

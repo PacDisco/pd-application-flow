@@ -666,10 +666,13 @@ export async function applyAppFee(app, schema) {
   // "Interview"; otherwise "Application Fee Received".
   const feeStage = pipeline ? R.findStage(pipeline, "appFee") : null;
   const ivStage = pipeline && app.interview_at ? R.findStage(pipeline, "interviewBooked") : null;
-  const stage = feeStage ? (ivStage || feeStage) : null;
+  let stage = feeStage ? (ivStage || feeStage) : null;
+  // Already further along in this pipeline (e.g. accepted before paying the
+  // fee): record the payment, never move the deal backwards.
+  if (stage && String(deal?.properties?.pipeline) === String(pipeline.id) && !R.isForward(pipeline, deal?.properties?.dealstage, stage)) stage = null;
   const pay = app.payment || {};
   const update = R.appFeeDealUpdate({
-    facts, pipeline: stage ? pipeline : null, stage, pdProgram, dealProps: deal?.properties || {},
+    facts, pipeline: stage || String(deal?.properties?.pipeline) === String(pipeline?.id) ? pipeline : null, stage, pdProgram, dealProps: deal?.properties || {},
     payment: { amount: pay.base ?? 250, reference: pay.reference, date: pay.paidAt || new Date().toISOString() },
   });
   const r = await HS.updateDeal(dealId, update);
@@ -678,6 +681,25 @@ export async function applyAppFee(app, schema) {
     pdProgram: pdProgram || null, travelYear: facts.year, dropped: r.dropped,
     warning: !pipeline ? `No pipeline for ${facts.programType}/${facts.season}` : !stage ? `No "Application Fee Received" stage in ${pipeline.label}` : undefined,
   };
+}
+
+/**
+ * Move a deal from "PD Applications" into its program pipeline at stage
+ * `kind` (e.g. accepted before the fee was paid). Returns { pipeline, stage } or null.
+ */
+export async function moveToProgramPipeline(app, schema, kind, deal = null) {
+  if (!app.hubspot_deal_id) return null;
+  const d = deal || await HS.getDeal(app.hubspot_deal_id);
+  const pipes = await HS.dealPipelines();
+  const { facts, pdProgram } = await pdProgramFor(schema, app);
+  const programType = facts.programType || app.program_type || K.programByName(schema, app.program)?.type || null;
+  const season = facts.season || app.season || (/(spring|summer|fall)/i.exec(app.term || "")?.[1] || "").toLowerCase() || null;
+  const pipeline = R.findPipeline(pipes, R.targetPipelineLabel(programType, season));
+  const stage = pipeline ? R.findStage(pipeline, kind) : null;
+  if (!stage) return null;
+  const update = R.appFeeDealUpdate({ facts, pipeline, stage, pdProgram, dealProps: d?.properties || {}, payment: null });
+  await HS.updateDeal(app.hubspot_deal_id, update);
+  return { pipeline: pipeline.label, stage: stage.label };
 }
 
 /**

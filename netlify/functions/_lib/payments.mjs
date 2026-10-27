@@ -370,7 +370,7 @@ async function depositReminder(app, e, decision, act, schema, now, log) {
   if (!(await claimKey(app.id, "depositReminded", key, now.toISOString()))) return { skipped: "taken" };
   try {
     const hold = new Date(act.holdUntil).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
-    await familyEmail(app, schema, "depositReminder", { holdUntil: hold, deposit: usd(e.offer?.deposit ?? P.DEPOSIT) }, { log });
+    await familyEmail(app, schema, "depositReminder", { holdUntil: hold, deposit: usd(P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0)) }, { log });
     return { depositReminder: act.stage };
   } catch (err) {
     await db().query(`UPDATE applications SET enrolment = enrolment #- $2::text[] WHERE id = $1`, [app.id, `{depositReminded,${key}}`]);

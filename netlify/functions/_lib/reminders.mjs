@@ -49,6 +49,8 @@ export function reminderAction(app, schema, now = new Date()) {
   if (app.paid_at) return { action: "none", reason: "paid" };
   if (app.status === "withdrawn") return { action: "none", reason: "withdrawn" };
   if (app.decision?.outcome === "declined") return { action: "none", reason: "declined" };
+  // Accepted before paying: the fee is part of their deposit now (deposit reminders take over).
+  if (app.decision?.outcome === "accepted") return { action: "none", reason: "accepted" };
   const r = app.reminders || {};
   if (r.stopped) return { action: "none", reason: "stopped" };
   if (r.closedAt) return { action: "none", reason: "closed" };

@@ -83,8 +83,8 @@ function render() {
       : `Confirm your place by paying your ${money(o.deposit)} deposit by <strong>${esc(dateL(o.holdUntil))}</strong>.`}</p>
     <table class="sum" aria-label="Your tuition">
       <tr><td>Program tuition</td><td>${money(o.tuition)}</td></tr>
-      <tr><td>Application fee (paid)</td><td>−${money(o.paid)}</td></tr>
-      <tr><td>Deposit</td><td>−${money(o.deposit)}</td></tr>
+      ${o.paid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.paid)}</td></tr>` : ''}
+      <tr><td>${o.paid > 0 ? 'Deposit' : 'Deposit (includes the application fee)'}</td><td>−${money(o.deposit)}</td></tr>
       <tr class="total"><td>Balance after your deposit</td><td>${money(o.balance)}</td></tr>
     </table>
   </section>

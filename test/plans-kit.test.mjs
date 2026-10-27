@@ -82,4 +82,10 @@ t('tuition already covered by the fee + deposit: one payment', () => {
   assert.deepEqual(keys(r), ['full']); assert.equal(r.options[0].payments[0].amount, 1750);
 });
 
+t('deposit: $2,250 after the fee, $2,500 when the fee is unpaid', () => {
+  assert.equal(P.depositFor(250), 2250); assert.equal(P.depositFor(0), 2500); assert.equal(P.depositFor(), 2500);
+  const r = P.paymentOptions({ tuition: 16500, paid: 0, deposit: P.depositFor(0), start: START, today: '2026-11-01' });
+  assert.equal(r.options[0].payments[0].amount, 2500); assert.equal(r.balance, 14000);
+});
+
 console.log(`plans-kit: ${n} passed`);

@@ -330,6 +330,11 @@ async function checkout(req) {
   if (!app) throw bad("We couldn't find that application.", 404);
   if (app.paid_at) throw bad("Your application fee has already been paid.", 409);
   if (!app.step2_at) throw bad("Please finish your application first.", 409);
+  // Accepted before paying the fee: it's part of their deposit now, so the
+  // payment button takes them to their acceptance page instead.
+  const [dec] = await db().query(`SELECT to_jsonb(applications)->'decision'->>'outcome' AS outcome FROM applications WHERE id = $1`, [app.id]);
+  if (dec?.outcome === "accepted") return json({ url: `${siteUrl()}/accept?token=${encodeURIComponent(body.token)}` });
+  if (dec?.outcome === "declined") throw bad("This application is closed. Please contact admissions@pacificdiscovery.org.", 409);
   const { schema } = await publishedSchema();
   if (!interviewCleared(app, schema)) {
     throw bad("Please book your interview first.", 409);

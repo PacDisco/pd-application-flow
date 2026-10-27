@@ -12,6 +12,10 @@
 // is already paid and counts toward tuition.
 
 export const DEPOSIT = 2250;
+/** Application fee + deposit. Someone accepted before paying the fee pays it all as their deposit. */
+export const DEPOSIT_TOTAL = 2500;
+/** The deposit to charge, given what's already been paid toward it (the fee). */
+export const depositFor = (paid = 0) => Math.max(DEPOSIT, DEPOSIT_TOTAL - (Number(paid) || 0));
 export const PLAN_END_DAYS = 60;
 export const LUMP_DUE_DAYS = 90;
 export const MONTHLY_MIN_DAYS = 90;

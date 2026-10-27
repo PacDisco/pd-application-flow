@@ -26,15 +26,15 @@ const quiet = { error() {}, warn() {} };
 
 let n = 0; const t = async (name, fn) => { await fn(); n++; console.log('  ✓', name); };
 let deals = 900;
-async function acceptedApp(email, { record = 'P5' } = {}) {
+async function acceptedApp(email, { record = 'P5', paid = true } = {}) {
   const deal = String(deals++);
   up.crm.deals.set(deal, { id: deal, properties: { pipeline: '74958084', dealstage: 'f9i' } });
   const answers = { preferredName: 'Sam', parent1Email: `parent.${email}`, parent1Name: { first: 'P', last: 'Q' } };
   const [{ id }] = (await pool.query(
     `INSERT INTO applications (token_hash, email, first_name, last_name, program, term, status, answers, step1_at, step2_at, interview_at, paid_at, payment, hubspot_contact_id, hubspot_deal_id, sync)
-     VALUES ($1,$2,'Sam','Lee','South America Gap Semester','Fall 2027','paid',$3, now(), now(), now(), now(), $4, '501', $5, $6) RETURNING id`,
-    [`h-${email}`, email, JSON.stringify(answers), JSON.stringify({ reference: 'pi_fee', base: 250, total: 258.75, currency: 'usd' }), deal,
-      JSON.stringify({ hsProgram: { record: { id: record } } })])).rows;
+     VALUES ($1,$2,'Sam','Lee','South America Gap Semester','Fall 2027',$7,$3, now(), now(), now(), $8, $4, '501', $5, $6) RETURNING id`,
+    [`h-${email}`, email, JSON.stringify(answers), paid ? JSON.stringify({ reference: 'pi_fee', base: 250, total: 258.75, currency: 'usd' }) : null, deal,
+      JSON.stringify({ hsProgram: { record: { id: record } } }), paid ? 'paid' : 'interview', paid ? new Date() : null])).rows;
   await decide(id, { outcome: 'accepted', by: 'Megan' }, { schema, log: quiet });
   const token = /\/accept\?token=([\w-]+)/.exec(mails.at(-1).text)[1];
   return { id, token, deal };
@@ -189,6 +189,26 @@ await t('acceptance email adapts to how close the start is (under 75 days → pa
   assert.match(mails.at(-1).text, /less than 75 days, the remaining tuition of \$15,250 is due/);
   const o = (await offer(token)).body.offer;
   assert.deepEqual(o.options.map((x) => x.key), ['full']);
+});
+
+await t('accepted before paying the fee: $2,500 deposit (fee included); the fee button goes to the acceptance page; paying the fee later makes it $2,250', async () => {
+  const { id, token } = await acceptedApp('nofee@x.org', { paid: false });
+  let o = (await offer(token)).body.offer;
+  assert.equal(o.state, 'offer'); assert.equal(o.paid, 0); assert.equal(o.deposit, 2500);
+  assert.equal(o.balance, 15500 - 2500);
+  assert.equal(o.options[0].payments[0].amount, 2500);
+  const r = await checkout({ token, plan: 'monthly', method: 'card', agree: true });
+  assert.equal(sessionOf(r.body.url).amount_total, 250000 + 8750);
+  // the old "pay application fee" button
+  const apply = (await import('../netlify/functions/apply.mjs')).default;
+  const res = await apply(new Request('https://apply.example.org/api/apply/checkout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }), { ip: '1.1.1.1' });
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(body.url, `https://apply.example.org/accept?token=${token}`);
+  // fee paid some other way after all → deposit back to $2,250
+  await pool.query(`UPDATE applications SET paid_at = now(), payment = '{"base":250,"reference":"pi_late"}' WHERE id = $1`, [id]);
+  o = (await offer(token)).body.offer;
+  assert.equal(o.paid, 250); assert.equal(o.deposit, 2250);
 });
 
 up.restore();

@@ -41,11 +41,7 @@ await t('service API needs the key', async () => {
   assert.equal((await call({ id: 'x', outcome: 'accepted' }, 'wrong')).status, 403);
 });
 
-await t('accept: needs the fee paid; holds the place 7 days; deal → Interview Complete; acceptance email; HubSpot note', async () => {
-  const unpaid = await insertApp('unpaid@x.org', { paid: false });
-  const r0 = await call({ id: unpaid, outcome: 'accepted', by: 'Megan' });
-  assert.equal(r0.status, 409); assert.match(r0.body.error, /hasn't been paid/);
-  assert.equal(await decision(unpaid), null, 'nothing stored');
+await t('accept: holds the place 7 days; deal → Interview Complete; acceptance email; HubSpot note', async () => {
 
   const id = await insertApp('acc@x.org');
   const before = mails.length;
@@ -75,6 +71,23 @@ await t('accept: needs the fee paid; holds the place 7 days; deal → Interview 
   assert.equal(up.crm.deals.get('900').properties.dealstage, 'p9c', 'Accepted → Interview Complete');
   assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Accepted.*Megan/);
   assert.equal((await call({ id, outcome: 'accepted', by: 'Megan' })).status, 409, 'already accepted');
+});
+
+await t('accept before the fee is paid: deposit is $2,500 (fee included); deal moved out of PD Applications into the program pipeline', async () => {
+  up.crm.deals.set('901', { id: '901', properties: { pipeline: '1', dealstage: 'a1' } });
+  const id = await insertApp('unpaid@x.org', { paid: false });
+  await pool.query(`UPDATE applications SET hubspot_deal_id = '901' WHERE id = $1`, [id]);
+  const r = await call({ id, outcome: 'accepted', by: 'Megan' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const d = await decision(id);
+  assert.equal(d.offer.paid, 0); assert.equal(d.offer.deposit, 2500);
+  assert.match(mails.at(-1).text, /\$2,500 deposit/);
+  assert.equal(d.refund, undefined);
+  const deal = up.crm.deals.get('901').properties;
+  assert.equal(deal.pipeline, '74759274', 'Spring Semester pipeline');
+  assert.equal(deal.dealstage, 'p9c', 'Interview Complete');
+  assert.equal(d.hubspot.stage, 'Interview Complete');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /\$2,500 deposit \(application fee not paid/);
 });
 
 await t('accept is refused (nothing stored, no email) without a program start date', async () => {

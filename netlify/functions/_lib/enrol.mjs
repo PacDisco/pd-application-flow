@@ -69,8 +69,9 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   const dates = await programDates(app);
   if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — the HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
+  const paid = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
   return {
-    tuition, paid: Number(app.payment?.base ?? 250), deposit: P.DEPOSIT,
+    tuition, paid, deposit: P.depositFor(paid),
     start: dates.start, end: dates.end, programRecordId: dates.recordId,
     holdUntil: new Date(now.getTime() + holdDays * DAY).toISOString(), at: now.toISOString(),
   };
@@ -109,7 +110,10 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
     };
   }
   if (decision?.outcome !== "accepted" || !enrolment.offer) return { ...base, state: "none" };
-  const o = enrolment.offer;
+  // What's been paid toward it can change after acceptance (the fee paid late),
+  // so it's worked out now rather than taken from the stored offer.
+  const paidNow = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
+  const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
   const holdUntil = decision.holdUntil || o.holdUntil;
   const expired = holdUntil && new Date(holdUntil) < now;
   const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now) });

@@ -41,6 +41,10 @@ await t('schedule: day 1, 4, 10, 21; close at 28', async () => {
   assert.deepEqual(at(28.1), { action: 'close' });
 });
 
+await t('accepted before paying: no more fee reminders (the fee is part of the deposit now)', async () => {
+  assert.equal(R.reminderAction({ ...base, step2_at: ago(4.2), decision: { outcome: 'accepted' } }, schema, now).reason, 'accepted');
+});
+
 await t('schedule: a missed stretch sends only the latest reminder, never a burst', async () => {
   const a = R.reminderAction({ ...base, step2_at: ago(11) }, schema, now);
   assert.deepEqual(a, { action: 'send', stage: 3, skip: [1, 2] });
