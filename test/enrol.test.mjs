@@ -282,6 +282,51 @@ await t('a discount switched on after acceptance still shows (the better of the 
   db.__clearSchemaCache?.();
 });
 
+await t('deposit paid another way: admissions marks it → family emailed to choose a plan; monthly saves a card (nothing charged), schedule starts with the deposit', async () => {
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  const { id, token, deal } = await acceptedApp('wired@x.org');
+  const before = mails.length;
+  const r = await PAY.markDepositPaid(id, { reference: 'Wise 42', by: 'Megan' }, schema);
+  assert.equal(r.amount, 2250);
+  assert.equal(up.crm.deals.get(deal).properties.dealstage, 'f9d', 'Deposit Paid/Customer');
+  const m = mails.at(-1); assert.equal(mails.length, before + 1);
+  assert.equal(m.to, 'wired@x.org, parent.wired@x.org');
+  assert.match(m.text, /received your \$2,250 deposit/); assert.match(m.text, /\/accept\?token=/);
+  await assert.rejects(PAY.markDepositPaid(id, { by: 'Megan' }, schema), /already recorded/);
+  const o = (await offer(token)).body.offer;
+  assert.equal(o.state, 'offer'); assert.equal(o.prepaid, 2250); assert.equal(o.deposit, 0); assert.equal(o.balance, 13000);
+  const monthly = o.options.find((x) => x.key === 'monthly');
+  assert.equal(monthly.payments[0].amount, 0);
+  assert.equal(monthly.payments.slice(1).reduce((a, p) => a + p.amount, 0), 13000);
+  const c = await checkout({ token, plan: 'monthly', method: 'card', agree: true });
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  const s = sessionOf(c.body.url);
+  assert.equal(s.mode, 'setup', 'saves a card, charges nothing');
+  Object.assign(s, { status: 'complete', setup_intent: 'seti_9' });
+  up.stripe.setupPm = 'pm_saved'; up.stripe.setupPmType = 'card';
+  const v = (await offer(token, `&session_id=${s.id}`)).body.offer;
+  assert.equal(v.state, 'enrolled');
+  const e = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [id])).rows[0].enrolment;
+  assert.deepEqual([e.schedule[0].kind, e.schedule[0].amount, e.schedule[0].status, e.schedule[0].reference], ['deposit', 2250, 'paid', 'Wise 42']);
+  assert.ok(e.schedule.slice(1).every((p) => p.status === 'scheduled'));
+  assert.equal(e.stripe.paymentMethod, 'pm_saved'); assert.equal(e.deposit.outside, true); assert.equal(e.choice.plan, 'monthly');
+  assert.ok(!Object.values(up.crm.deals.get(deal).properties).some((x) => /^2250, /.test(String(x))), 'deposit not logged twice on the deal');
+});
+
+await t('deposit paid another way: "balance later" needs no Stripe; "full" charges just the rest', async () => {
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  const a = await acceptedApp('wired2@x.org');
+  await PAY.markDepositPaid(a.id, { amount: 2250, by: 'Megan' }, schema);
+  const r = await checkout({ token: a.token, plan: 'later', method: 'card', agree: true });
+  assert.equal(r.status, 200); assert.match(r.body.url, /\/accept\?token=.*&paid=1$/);
+  const e = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [a.id])).rows[0].enrolment;
+  assert.equal(e.deposit.status, 'paid'); assert.deepEqual(e.schedule.map((p) => p.status), ['paid', 'due']);
+  const b = await acceptedApp('wired3@x.org');
+  await PAY.markDepositPaid(b.id, { amount: 2250, by: 'Megan' }, schema);
+  const f = sessionOf((await checkout({ token: b.token, plan: 'full', method: 'card', agree: true })).body.url);
+  assert.equal(f.mode, 'payment'); assert.equal(f.amount_total, 1300000 + 45500);
+});
+
 await t('pay-in-full discount by program type; off → none', async () => {
   const E = await import('../netlify/functions/_lib/enrol.mjs');
   const st = { settings: { payInFull: { enabled: true, semester: 500, mini: 250, summer: 0 } }, programs: schema.programs };

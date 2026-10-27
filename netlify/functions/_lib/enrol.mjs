@@ -24,7 +24,7 @@ import * as R from "./routing.mjs";
 import * as K from "../../../public/form-kit.mjs";
 import * as P from "../../../public/plans-kit.mjs";
 import * as TK from "../../../public/terms-kit.mjs";
-import { createDepositCheckout, getCheckoutSession, getPaymentIntent } from "./stripe.mjs";
+import { createDepositCheckout, createSetupCheckout, getCheckoutSession, getPaymentIntent, getSetupIntent } from "./stripe.mjs";
 import { mailOn, alertOn, sendEnrolled, sendDepositAlert } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
@@ -138,9 +138,12 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   // What's been paid toward it can change after acceptance (the fee paid late),
   // so it's worked out now rather than taken from the stored offer.
   const paidNow = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
-  const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
+  // Deposit already paid another way (admissions → Mark deposit paid): they
+  // only choose how to pay the rest; nothing more is due today for most plans.
+  const prepaid = Number(enrolment.prepaid?.amount) || 0;
+  const o = { ...enrolment.offer, paid: paidNow + prepaid, deposit: Math.max(0, P.depositFor(paidNow) - prepaid) };
   const holdUntil = decision.holdUntil || o.holdUntil;
-  const expired = holdUntil && new Date(holdUntil) < now;
+  const expired = !prepaid && holdUntil && new Date(holdUntil) < now;
   // Discounts: what they were offered at acceptance, or today's settings if
   // those are better (a discount added after they were accepted still applies;
   // lowering one never takes back what they were told).
@@ -152,6 +155,7 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   return {
     ...base, state: expired ? "expired" : "offer",
     tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, end: o.end, holdUntil,
+    ...(prepaid ? { prepaid, feePaid: paidNow } : {}),
     balance: opts.balance, daysToStart: opts.daysToStart, options: opts.options, rates,
     terms: terms ? { version: terms.version, title: terms.title, url: `${siteUrl()}/terms?v=${terms.version}` } : null,
   };
@@ -178,6 +182,24 @@ export async function startCheckout(app, { plan, method, agree, token }, schema,
     : option.payments[0].amount > view.deposit ? `Deposit + first instalment — ${program}` : `Deposit — ${program}`;
   const ret = acceptLink(token);
   const currency = String(schema.settings?.currency || "usd").toLowerCase();
+  const pendingBase = { plan, method, option, rate, charge, termsVersion: terms?.version || null, agreedAt: now.toISOString(), at: now.toISOString() };
+  if (charge.base <= 0) {
+    // Deposit already paid, nothing due today.
+    if (option.payments.some((p) => p.kind === "instalment")) {
+      // Save a card / bank account for the automatic payments (Checkout, setup mode).
+      const session = await createSetupCheckout({
+        app, successUrl: `${ret}&paid=1&session_id={CHECKOUT_SESSION_ID}`, cancelUrl: `${ret}&cancelled=1`,
+        metadata: { payment_kind: "deposit", plan, method, terms_version: terms?.version || "" },
+      });
+      await patchEnrolment(app.id, { pending: { ...pendingBase, sessionId: session.id } });
+      return { url: session.url };
+    }
+    // "Balance later": nothing to charge or save — record the choice now.
+    const sessionId = `none-${now.getTime()}`;
+    await patchEnrolment(app.id, { pending: { ...pendingBase, sessionId } });
+    await recordDeposit({ id: sessionId, client_reference_id: app.id, payment_status: "paid", status: "complete", mode: "none" }, schema);
+    return { url: `${ret}&paid=1` };
+  }
   const session = await createDepositCheckout({
     app, currency, method,
     lines: [[what, charge.base], [method === "ach" ? `Bank payment fee (${(rate * 100).toFixed(1).replace(/\.0$/, "")}%)` : `Card processing fee (${(rate * 100).toFixed(1).replace(/\.0$/, "")}%)`, charge.fee]],
@@ -209,21 +231,43 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
   const { enrolment } = await readEnrolment(app.id);
   const choice = [enrolment.pending, enrolment.lastPending].find((c) => c?.sessionId === session.id);
   if (!choice) { log.warn?.("[enrol] unknown deposit session", session.id); return { first: false }; }
-  const status = session.payment_status === "paid" ? "paid"
+  const status = session.payment_status === "paid" || (session.mode === "setup" && session.status === "complete") ? "paid"
     : session.status === "complete" && session.payment_status === "unpaid" ? "processing" : null;
   if (!status) return { first: false };
   if (enrolment.deposit?.sessionId === session.id && (enrolment.deposit.status === status || enrolment.deposit.status === "paid")) return { first: false, enrolment };
 
-  let paymentMethod = null;
-  try { paymentMethod = session.payment_intent ? (await getPaymentIntent(session.payment_intent))?.payment_method || null : null; } catch { /* not needed to confirm the place */ }
-  const schedule = choice.option.payments.map((p, i) => ({ ...p, status: i === 0 ? status : p.manual ? "due" : "scheduled" }));
-  const deposit = {
-    amount: choice.charge.base, fee: choice.charge.fee, total: choice.charge.total, method: choice.method,
-    reference: session.payment_intent || session.id, sessionId: session.id, status, paidAt: new Date().toISOString(),
-    ...(choice.option?.discount ? { discount: choice.option.discount, discountPlan: choice.plan } : {}),
-  };
+  let paymentMethod = null; let method = choice.method;
+  try {
+    if (session.mode !== "setup" && session.payment_intent) paymentMethod = (await getPaymentIntent(session.payment_intent))?.payment_method || null;
+    else if (session.setup_intent) {
+      const pm = (await getSetupIntent(typeof session.setup_intent === "string" ? session.setup_intent : session.setup_intent.id))?.payment_method;
+      paymentMethod = pm || null;
+      if (pm?.type) method = pm.type === "us_bank_account" ? "ach" : "card";
+    }
+  } catch { /* not needed to confirm the place */ }
+  const prepaid = enrolment.prepaid || null;
+  const paidAt = new Date().toISOString();
+  const today = choice.option.payments[0];
+  let schedule = choice.option.payments.map((p, i) => ({ ...p, status: i === 0 ? status : p.manual ? "due" : "scheduled" }));
+  if (prepaid) {
+    // The deposit row is what they paid another way; anything charged today is a first instalment.
+    schedule = [
+      { due: String(prepaid.at || paidAt).slice(0, 10), amount: Number(prepaid.amount), kind: "deposit", status: "paid", reference: prepaid.reference || null, method: "manual" },
+      ...(today.amount > 0 ? [{ ...today, kind: "instalment", status, ...(status === "paid" ? { paidAt, reference: session.payment_intent || session.id } : {}) }] : []),
+      ...schedule.slice(1),
+    ];
+  }
+  const deposit = prepaid
+    ? { amount: Number(prepaid.amount), fee: 0, total: Number(prepaid.amount), method: "manual", reference: prepaid.reference || "paid outside Stripe", outside: true,
+        sessionId: session.id, status, paidAt: prepaid.at || paidAt, ...(today.amount > 0 ? { todayAmount: choice.charge.total, todayReference: session.payment_intent || session.id } : {}),
+        ...(choice.option?.discount ? { discount: choice.option.discount, discountPlan: choice.plan } : {}) }
+    : {
+        amount: choice.charge.base, fee: choice.charge.fee, total: choice.charge.total, method: choice.method,
+        reference: session.payment_intent || session.id, sessionId: session.id, status, paidAt,
+        ...(choice.option?.discount ? { discount: choice.option.discount, discountPlan: choice.plan } : {}),
+      };
   const patch = {
-    choice: { plan: choice.plan, method: choice.method, rate: choice.rate ?? null, termsVersion: choice.termsVersion, agreedAt: choice.agreedAt },
+    choice: { plan: choice.plan, method, rate: method === choice.method ? (choice.rate ?? null) : K.surchargeRates(schema)[method], termsVersion: choice.termsVersion, agreedAt: choice.agreedAt },
     deposit, schedule, stripe: { customer: session.customer || null, paymentMethod: paymentMethod ? (paymentMethod.id || String(paymentMethod)) : null },
     pending: null, lastPending: choice,
   };
@@ -246,15 +290,17 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
       const st = R.findStage(pipe, "depositPaid");
       const props = {};
       if (st && R.isForward(pipe, deal?.properties?.dealstage, st)) props.dealstage = st.id;
-      const slot = R.choosePaymentSlot(deal?.properties || {}, deposit.reference);
-      if (slot) props[slot] = R.paymentEntry(deposit.amount, deposit.reference, deposit.paidAt);
+      // Paid another way: whoever recorded it logged it; only today's charge (if any) goes on the deal here.
+      const logged = deposit.outside ? (deposit.todayReference ? { amount: choice.charge.base, reference: deposit.todayReference } : null) : { amount: deposit.amount, reference: deposit.reference };
+      const slot = logged && R.choosePaymentSlot(deal?.properties || {}, logged.reference);
+      if (slot) props[slot] = R.paymentEntry(logged.amount, logged.reference, paidAt);
       // Plan discount: the deal's amount becomes what they actually owe,
       // so the portal (and reporting) don't show the discount as still due.
       if (deposit.discount && enrolment.offer?.tuition) props.amount = String(Math.round((enrolment.offer.tuition - deposit.discount) * 100) / 100);
       if (Object.keys(props).length) await HS.updateDeal(app.hubspot_deal_id, props);
       const plan = PLAN_LABEL[choice.plan];
       const rows = schedule.filter((p) => p.kind !== "deposit").map((p) => `<li>${esc(p.due)} — $${p.amount.toFixed(2)}${p.manual ? " (to pay by this date)" : " (automatic)"}</li>`).join("");
-      await HS.addNote(`<p><strong>Place confirmed</strong> — paid $${deposit.total.toFixed(2)} by ${choice.method === "ach" ? "bank account" : "card"} (${esc(deposit.reference)}). Plan: ${esc(plan)}${deposit.discount ? ` with the $${deposit.discount.toLocaleString("en-US")} ${choice.plan === "two" ? "two-instalment (off the final payment)" : "pay-in-full"} discount (deal amount set to $${(enrolment.offer.tuition - deposit.discount).toLocaleString("en-US")})` : ""}. Terms v${esc(choice.termsVersion || "?")} agreed ${esc(choice.agreedAt)}.</p>${rows ? `<ul>${rows}</ul>` : ""}`,
+      await HS.addNote(`<p><strong>${deposit.outside ? "Payment plan chosen" : "Place confirmed"}</strong> — ${deposit.outside ? `deposit of $${deposit.amount.toFixed(2)} paid outside Stripe (${esc(deposit.reference)})${deposit.todayAmount ? `; $${Number(deposit.todayAmount).toFixed(2)} paid today` : ""}${paymentMethod ? `; ${method === "ach" ? "bank account" : "card"} saved for automatic payments` : ""}` : `paid $${deposit.total.toFixed(2)} by ${choice.method === "ach" ? "bank account" : "card"} (${esc(deposit.reference)})`}. Plan: ${esc(plan)}${deposit.discount ? ` with the $${deposit.discount.toLocaleString("en-US")} ${choice.plan === "two" ? "two-instalment (off the final payment)" : "pay-in-full"} discount (deal amount set to $${(enrolment.offer.tuition - deposit.discount).toLocaleString("en-US")})` : ""}. Terms v${esc(choice.termsVersion || "?")} agreed ${esc(choice.agreedAt)}.</p>${rows ? `<ul>${rows}</ul>` : ""}`,
         { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id });
       patch.hubspot = { ok: true, stage: props.dealstage ? st.label : null };
     } catch (err) { log.error?.("[enrol hubspot]", err.message); patch.hubspot = { ok: false, error: String(err.message).slice(0, 300) }; }

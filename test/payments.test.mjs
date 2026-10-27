@@ -406,6 +406,14 @@ await t('student portal: accepted but no deposit yet → "offer" (confirm your p
   const { plan } = await res.json();
   assert.equal(plan.state, 'offer'); assert.equal(plan.deposit, 2250); assert.equal(plan.holdPassed, false);
   assert.equal((await svc('plan-link', { dealId: deal, email: 'portaloffer@x.org' })).status, 200);
+  const { id } = (await pool.query(`SELECT id FROM applications WHERE email = 'portaloffer@x.org'`)).rows[0];
+  assert.equal((await svc('deposit-mark-paid', { id, reference: 'Wise 7', by: 'Megan' })).status, 200);
+  const after = await (await service(new Request(`https://apply.example.org/api/service/plan?dealId=${deal}&email=portaloffer@x.org`, { headers: { 'x-apply-key': 'svc' } }))).json();
+  assert.equal(after.plan.state, 'choose'); assert.equal(after.plan.deposit, 2250);
+  // no deposit reminders once it's been paid another way
+  const before = mails.length;
+  await run(new Date(Date.now() + 5.5 * 864e5));
+  assert.equal(mails.filter((m, i) => i >= before && m.to.includes('portaloffer')).length, 0);
 });
 
 await t('student portal: plan by deal for the student or a parent only; a fresh link on request', async () => {

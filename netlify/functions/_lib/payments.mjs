@@ -111,6 +111,7 @@ export function itemAction(item, e, now, cfg) {
 export function depositAction(e, decision, now, cfg) {
   if (!cfg.depositReminders || decision?.outcome !== "accepted" || !e?.offer) return { action: "none" };
   if (["paid", "processing"].includes(e.deposit?.status)) return { action: "none" };
+  if (e.prepaid) return { action: "none", reason: "deposit paid another way" };
   const holdUntil = decision.holdUntil || e.offer.holdUntil;
   if (!holdUntil) return { action: "none" };
   const hold = new Date(holdUntil);
@@ -689,6 +690,39 @@ export async function withdraw(appId, { by = "admissions", reason = "" } = {}, {
   return { withdrawn: true, kept, cancelled, cancelledAmount, inFlight, stage };
 }
 
+/**
+ * Admissions: the deposit was paid another way (bank transfer, the old portal
+ * button). Holds the place, moves the deal to Deposit Paid, and emails the
+ * family a link to choose how to pay the rest (no deposit charged again).
+ */
+export async function markDepositPaid(appId, { amount, reference = "", by = "admissions" } = {}, schema, { log = console } = {}) {
+  const app = await A.byId(appId);
+  if (!app) throw bad("Application not found.", 404);
+  const { enrolment: e, decision: d } = await readEnrolment(appId);
+  if (d?.outcome !== "accepted" || !e.offer) throw bad("Accept the application first (that sets the offer the plan is built from).", 409);
+  if (["paid", "processing"].includes(e.deposit?.status) || e.prepaid) throw bad("The deposit is already recorded.", 409);
+  const fee = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
+  const amt = Math.round((Number(amount) || P.depositFor(fee)) * 100) / 100;
+  if (amt <= 0) throw bad("Enter the amount paid.");
+  const at = new Date().toISOString();
+  await patchEnrolment(appId, { prepaid: { amount: amt, reference: String(reference || "").trim().slice(0, 120) || null, at, by: String(by).slice(0, 120) } });
+  let stage = null;
+  if (hubspotOn() && app.hubspot_deal_id) {
+    try {
+      const deal = await HS.getDeal(app.hubspot_deal_id);
+      const pipe = (await HS.dealPipelines()).find((p) => p.id === String(deal?.properties?.pipeline));
+      const st = R.findStage(pipe, "depositPaid");
+      if (st && R.isForward(pipe, deal?.properties?.dealstage, st)) { await HS.updateDeal(app.hubspot_deal_id, { dealstage: st.id }); stage = st.label; }
+    } catch (err) { log.error?.("[mark deposit hubspot]", err.message); }
+  }
+  await note(app, `<p><strong>Deposit marked paid</strong> by ${esc(by)} — ${usd(amt)}${reference ? ` (${esc(reference)})` : ""}, paid outside the acceptance page. The family has been asked to choose how to pay the rest.</p>`, log);
+  let email = null;
+  try { email = await familyEmail(app, schema, "choosePlan", { deposit: usd(amt) }, { log }); }
+  catch (err) { log.error?.("[mark deposit email]", err.message); email = { error: String(err.message).slice(0, 300) }; }
+  await patchEnrolment(appId, { prepaidEmail: email });
+  return { amount: amt, stage, email };
+}
+
 /** Admissions: paid outside Stripe (e.g. a bank transfer) — mark it so it isn't charged too. */
 export async function markPaidOutside(appId, idx, { by = "admissions", reference = "" } = {}, schema) {
   const ref = String(reference || "").trim().slice(0, 120) || `manual-${new Date().toISOString().slice(0, 10)}`;
@@ -716,6 +750,7 @@ export function portalPlan(app) {
   // page (plan choice, discounts, deposit) instead of its own pay buttons.
   if (d?.outcome === "accepted" && !e.withdrawn && !["paid", "processing"].includes(e.deposit?.status) && app.status !== "withdrawn") {
     const holdUntil = d.holdUntil || e.offer?.holdUntil || null;
+    if (e.prepaid) return { state: "choose", deposit: Number(e.prepaid.amount), holdPassed: false, start: e.offer?.start || null };
     return {
       state: "offer",
       deposit: P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0),

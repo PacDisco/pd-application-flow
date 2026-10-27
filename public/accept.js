@@ -65,8 +65,19 @@ function render() {
   const sel = o.options.find((x) => x.key === S.plan) || main[0];
   const charge = todayCharge(sel, o.rates[S.method]);
   const later = sel.payments.slice(1);
+  const pre = !!o.prepaid;
+  const instal = (x) => x.payments.some((p) => p.kind === 'instalment');
   const describe = (x) => {
     const rest = x.payments.slice(1);
+    if (pre) {
+      const off = x.discount && x.key === 'two' ? ` — ${money(x.discount)} off your final payment` : '';
+      if (x.key === 'full') return x.discount ? `Pay ${money(x.payments[0].amount)} today instead of ${money(x.fullPrice)} — nothing more to pay.` : `Pay the remaining ${money(x.payments[0].amount)} today — nothing more to pay.`;
+      if (x.key === 'later') return `Pay the ${money(rest[0].amount)} balance yourself, any time before ${dateL(rest[0].due)}.`;
+      if (x.key === 'two') return (x.payments[0].amount > 0
+        ? `${money(x.payments[0].amount)} today, then ${money(rest[0].amount)} on ${dateL(rest[0].due)}`
+        : `${money(rest[0].amount)} on ${dateL(rest[0].due)} and ${money(rest[1].amount)} on ${dateL(rest[1].due)}, charged automatically`) + `${off}.`;
+      return `${rest.length} monthly payments of about ${money(rest[0].amount)} from ${dateL(rest[0].due)} to ${dateL(rest[rest.length - 1].due)}, charged automatically.`;
+    }
     if (x.key === 'full') return x.discount
       ? `Pay ${money(x.payments[0].amount)} today instead of ${money(x.fullPrice)} — nothing more to pay.`
       : `Pay the full ${money(x.payments[0].amount)} today — nothing more to pay.`;
@@ -82,15 +93,18 @@ function render() {
   $('#view').innerHTML = `
   <section class="card">
     <p class="small" style="margin:0 0 6px">${esc(o.program)}${o.term ? ` · ${esc(o.term)}` : ''}</p>
-    <h1 class="serif">Congratulations${o.firstName ? `, ${esc(o.firstName)}` : ''}!</h1>
-    <p class="lead">You've been accepted to <strong>${esc(o.program)}</strong>, starting ${esc(dateL(o.start))}. ${o.options.length === 1 && o.options[0].key === 'full'
+    <h1 class="serif">${pre ? `Choose your payment plan${o.firstName ? `, ${esc(o.firstName)}` : ''}` : `Congratulations${o.firstName ? `, ${esc(o.firstName)}` : ''}!`}</h1>
+    ${pre ? `<p class="lead">We've received your ${money(o.prepaid)} deposit, so your place on <strong>${esc(o.program)}</strong> (starting ${esc(dateL(o.start))}) is held. Choose how you'd like to pay the rest of your tuition.</p>` : `<p class="lead">You've been accepted to <strong>${esc(o.program)}</strong>, starting ${esc(dateL(o.start))}. ${o.options.length === 1 && o.options[0].key === 'full'
       ? `As your program starts in less than ${o.daysToStart < 75 ? '75' : '90'} days, please pay your tuition balance by <strong>${esc(dateL(o.holdUntil))}</strong> to confirm your place.`
-      : `Confirm your place by paying your ${money(o.deposit)} deposit by <strong>${esc(dateL(o.holdUntil))}</strong>.`}</p>
+      : `Confirm your place by paying your ${money(o.deposit)} deposit by <strong>${esc(dateL(o.holdUntil))}</strong>.`}</p>`}
     <table class="sum" aria-label="Your tuition">
       <tr><td>Program tuition</td><td>${money(o.tuition)}</td></tr>
-      ${o.paid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.paid)}</td></tr>` : ''}
+      ${pre
+        ? `${o.feePaid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.feePaid)}</td></tr>` : ''}<tr><td>Deposit (paid)</td><td>−${money(o.prepaid)}</td></tr>
+      <tr class="total"><td>Remaining tuition</td><td>${money(o.balance)}</td></tr>`
+        : `${o.paid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.paid)}</td></tr>` : ''}
       <tr><td>${o.paid > 0 ? 'Deposit' : 'Deposit (includes the application fee)'}</td><td>−${money(o.deposit)}</td></tr>
-      <tr class="total"><td>Balance after your deposit</td><td>${money(o.balance)}</td></tr>
+      <tr class="total"><td>Balance after your deposit</td><td>${money(o.balance)}</td></tr>`}
     </table>
   </section>
   <section class="card">
@@ -99,7 +113,7 @@ function render() {
       ${main.map((x, i) => `<label class="opt${x.key === 'full' && x.discount ? ' opt--best' : ''}" data-on="${x.key === S.plan}"><input type="radio" name="plan" value="${x.key}"${x.key === S.plan ? ' checked' : ''}>
         <span><span class="t">${esc(x.label.replace(/ — save .*/, ''))}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}${x.discount ? (x.key === 'full' ? '<span class="tag tag--best">Best value</span>' : `<span class="tag tag--save">Save ${money(x.discount)}</span>`) : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span>${x.key === 'full' && x.discount ? `<span class="save">You save ${money(x.discount)}</span>` : ''}</span></label>`).join('')}
     </div>
-    ${quiet ? `<p style="margin:4px 0 0"><button type="button" class="quiet" id="later">${S.plan === 'later' ? '✓ ' : ''}Or pay the ${money(o.deposit)} deposit now and the balance by ${esc(dateL(quiet.payments[1].due))}</button></p>` : ''}
+    ${quiet ? `<p style="margin:4px 0 0"><button type="button" class="quiet" id="later">${S.plan === 'later' ? '✓ ' : ''}${pre ? `Or pay the balance yourself by ${esc(dateL(quiet.payments[1].due))}` : `Or pay the ${money(o.deposit)} deposit now and the balance by ${esc(dateL(quiet.payments[1].due))}`}</button></p>` : ''}
     ${later.length ? `<details style="margin-top:14px"${S.plan === 'later' ? ' open' : ''}><summary class="small">Payment schedule</summary><table class="sched">
       ${sel.payments.map((p, i) => `<tr><td>${i === 0 ? 'Today' : esc(dateS(p.due))}${p.manual ? ' <span class="small">(you pay by this date)</span>' : ''}</td><td>${money(p.amount)}</td></tr>`).join('')}</table>
       <p class="small">${later.some((p) => !p.manual) ? 'Instalments are charged automatically to the card or bank account you use today, and we email you 3 days before each one.' : ''} The ${S.method === 'ach' ? 'bank payment' : 'card processing'} fee (${pct(o.rates[S.method])}) is added to each payment.</p></details>` : ''}
@@ -115,9 +129,10 @@ function render() {
       ${charge.fee ? `<tr><td>${S.method === 'ach' ? 'Bank payment fee' : 'Card processing fee'} (${pct(o.rates[S.method])})</td><td>${money(charge.fee)}</td></tr>` : ''}
       <tr class="total"><td>Today</td><td>${money(charge.total)}</td></tr>
     </table>
+    ${charge.base <= 0 ? `<p class="small" style="margin:8px 0 0">${instal(sel) ? 'Nothing to pay today. You\'ll save your card or bank account for the automatic payments, and we email you 3 days before each one.' : 'Nothing to pay today.'}</p>` : ''}
     <label class="agree"><input type="checkbox" id="agree"${S.agree ? ' checked' : ''}><span>I agree to the ${o.terms ? `<a href="${esc(o.terms.url)}" target="_blank" rel="noopener">${esc(o.terms.title)}</a> (version ${esc(o.terms.version)})` : 'Program Terms & Conditions'}, including the payment and refund terms.</span></label>
     <div class="pay"><span class="small">Secure payment by Stripe. You'll come straight back here.</span>
-      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>Pay ${money(charge.total)} and confirm my place →</button></div>
+      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>${charge.base > 0 ? `Pay ${money(charge.total)} and ${pre ? 'confirm my plan' : 'confirm my place'} →` : instal(sel) ? 'Save my payment details →' : 'Confirm my plan →'}</button></div>
   </section>
   ${advisorCard(o)}`;
   document.querySelectorAll('input[name=plan]').forEach((el) => el.addEventListener('change', () => { S.plan = el.value; render(); }));
