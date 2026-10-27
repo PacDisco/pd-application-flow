@@ -20,6 +20,9 @@ export const FORM_ID = "pd-application";
 let _schemaCache = null;
 const SCHEMA_TTL_MS = 30 * 1000;
 
+/** Tests: forget the cached schema. */
+export function __clearSchemaCache() { _schemaCache = null; }
+
 /** The PUBLISHED form schema (with its rev), cached briefly per warm container. */
 export async function publishedSchema({ fresh = false } = {}) {
   if (!fresh && _schemaCache && Date.now() - _schemaCache.at < SCHEMA_TTL_MS) return _schemaCache;

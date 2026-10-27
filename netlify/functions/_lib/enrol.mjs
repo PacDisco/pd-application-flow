@@ -141,7 +141,13 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
   const holdUntil = decision.holdUntil || o.holdUntil;
   const expired = holdUntil && new Date(holdUntil) < now;
-  const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now), discounts: o.discounts || { full: o.payInFullDiscount || 0 } });
+  // Discounts: what they were offered at acceptance, or today's settings if
+  // those are better (a discount added after they were accepted still applies;
+  // lowering one never takes back what they were told).
+  const fixed = o.discounts || { full: o.payInFullDiscount || 0, two: 0 };
+  const live = planDiscounts(schema, app);
+  const discounts = { full: Math.max(fixed.full || 0, live.full), two: Math.max(fixed.two || 0, live.two) };
+  const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now), discounts });
   const rates = K.surchargeRates(schema);
   return {
     ...base, state: expired ? "expired" : "offer",

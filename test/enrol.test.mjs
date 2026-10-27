@@ -267,6 +267,21 @@ await t('discounts end 60 days before the start', async () => {
   assert.equal(o.options[0].discount, undefined);
 });
 
+await t('a discount switched on after acceptance still shows (the better of the two applies)', async () => {
+  const { token } = await acceptedApp('after@x.org');
+  assert.equal((await offer(token)).body.offer.options.find((x) => x.key === 'full').discount, undefined);
+  const pub = (await pool.query(`SELECT published FROM apply_forms LIMIT 1`)).rows[0].published;
+  pub.settings = { ...(pub.settings || {}), discounts: { enabled: true, full: { semester: 400 }, two: { semester: 150 } } };
+  await pool.query(`UPDATE apply_forms SET published = $1`, [JSON.stringify(pub)]);
+  const db = await import('../netlify/functions/_lib/db.mjs'); db.__clearSchemaCache?.();
+  const o = (await offer(token)).body.offer;
+  assert.equal(o.options.find((x) => x.key === 'full').discount, 400);
+  assert.equal(o.options.find((x) => x.key === 'two').discount, 150);
+  delete pub.settings.discounts;
+  await pool.query(`UPDATE apply_forms SET published = $1`, [JSON.stringify(pub)]);
+  db.__clearSchemaCache?.();
+});
+
 await t('pay-in-full discount by program type; off → none', async () => {
   const E = await import('../netlify/functions/_lib/enrol.mjs');
   const st = { settings: { payInFull: { enabled: true, semester: 500, mini: 250, summer: 0 } }, programs: schema.programs };
