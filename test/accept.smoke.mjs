@@ -7,6 +7,7 @@ import { setupDb, fakeUpstreams, startServer } from './harness.mjs';
 
 Object.assign(process.env, { HUBSPOT_TOKEN: 'x', STRIPE_SECRET_KEY: 'sk', APPLY_SERVICE_KEY: 'svc', APPLY_SITE_URL: 'http://localhost:8898', URL: 'http://localhost:8898', SMTP_USER: 'a@b.org', SMTP_PASS: 'x' });
 const schema = JSON.parse(readFileSync(new URL('../scripts/seed-schema.json', import.meta.url)));
+schema.settings.discounts = { enabled: true, full: { semester: 500, mini: 250 }, two: { semester: 250 } };
 const { pool } = await setupDb(schema);
 const up = fakeUpstreams();
 const N = await import('../netlify/functions/_lib/notify.mjs');
@@ -48,6 +49,7 @@ try {
     assert.equal(await page.inputValue('input[name=plan]:checked'), 'monthly');
     assert.match(await page.textContent('#pay'), /Pay \$2,328\.75/);
     assert.ok(await page.isDisabled('#pay'), 'needs the terms ticked');
+    assert.match(await page.textContent('.opt--best'), /Best value.*You save \$500/s);
     await shot('1-offer');
 
     await page.check('input[name=method][value=ach]');

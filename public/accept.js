@@ -96,8 +96,8 @@ function render() {
   <section class="card">
     <h2 class="serif">How would you like to pay?</h2>
     <div class="opts" role="radiogroup" aria-label="Payment plan">
-      ${main.map((x, i) => `<label class="opt" data-on="${x.key === S.plan}"><input type="radio" name="plan" value="${x.key}"${x.key === S.plan ? ' checked' : ''}>
-        <span><span class="t">${esc(x.label.replace(/ — save .*/, ''))}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}${x.discount ? `<span class="tag tag--save">Save ${money(x.discount)}</span>` : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span></span></label>`).join('')}
+      ${main.map((x, i) => `<label class="opt${x.key === 'full' && x.discount ? ' opt--best' : ''}" data-on="${x.key === S.plan}"><input type="radio" name="plan" value="${x.key}"${x.key === S.plan ? ' checked' : ''}>
+        <span><span class="t">${esc(x.label.replace(/ — save .*/, ''))}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}${x.discount ? (x.key === 'full' ? '<span class="tag tag--best">Best value</span>' : `<span class="tag tag--save">Save ${money(x.discount)}</span>`) : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span>${x.key === 'full' && x.discount ? `<span class="save">You save ${money(x.discount)}</span>` : ''}</span></label>`).join('')}
     </div>
     ${quiet ? `<p style="margin:4px 0 0"><button type="button" class="quiet" id="later">${S.plan === 'later' ? '✓ ' : ''}Or pay the ${money(o.deposit)} deposit now and the balance by ${esc(dateL(quiet.payments[1].due))}</button></p>` : ''}
     ${later.length ? `<details style="margin-top:14px"${S.plan === 'later' ? ' open' : ''}><summary class="small">Payment schedule</summary><table class="sched">

@@ -92,3 +92,8 @@
   for = "/accept.js"
   [headers.values]
     Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/accept.html"
+  [headers.values]
+    Cache-Control = "no-cache"
