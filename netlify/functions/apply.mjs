@@ -19,6 +19,7 @@ import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import { sanitizeAttribution } from "../../public/attribution-kit.mjs";
 import { createAppFeeCheckout, getCheckoutSession } from "./_lib/stripe.mjs";
+import { dealPaid } from "./_lib/deal-paid.mjs";
 import { publishedTermsOrNull } from "./_lib/terms.mjs";
 import * as TK from "../../public/terms-kit.mjs";
 import { trackApplication, cleanEventId, feeEventId } from "./_lib/tracking.mjs";
@@ -336,6 +337,9 @@ async function checkout(req) {
   if (dec?.outcome === "accepted") return json({ url: `${siteUrl()}/accept?token=${encodeURIComponent(body.token)}` });
   if (dec?.outcome === "declined") throw bad("This application is closed. Please contact admissions@pacificdiscovery.org.", 409);
   const { schema } = await publishedSchema();
+  // Paid another way already (the portal, a bank transfer) — it's on the deal.
+  const dp = await dealPaid(app, { fresh: true });
+  if (dp && dp.total >= Number(schema?.settings?.appFee ?? 250)) throw bad("Your application fee has already been paid — thank you! We'll be in touch about next steps.", 409);
   if (!interviewCleared(app, schema)) {
     throw bad("Please book your interview first.", 409);
   }

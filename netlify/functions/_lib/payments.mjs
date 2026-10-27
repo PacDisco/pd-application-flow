@@ -31,7 +31,8 @@ import * as TK from "../../../public/terms-kit.mjs";
 import { chargeSaved, expireCheckout, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
 import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
-import { acceptLink } from "./enrol.mjs";
+import { acceptLink, paidSoFar } from "./enrol.mjs";
+import { dealPaid } from "./deal-paid.mjs";
 
 const DAY = 864e5;
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -407,6 +408,14 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
     try {
       if (e.withdrawn) continue;
       if (!["paid", "processing"].includes(e.deposit?.status)) {
+        // Deposit paid another way and on the HubSpot deal → ask them to choose a plan (once).
+        if (!e.prepaid) {
+          const total = paidSoFar(app, e, (await dealPaid(app, { fresh: true }))?.total);
+          if (total >= P.DEPOSIT_TOTAL) {
+            out.actions.push({ id: app.id, ...(await recordPrepaid(app, { total, source: "hubspot", by: "the HubSpot deal" }, schema, { log })) });
+            continue;
+          }
+        }
         const act = depositAction(e, app.decision, now, cfg);
         if (act.action === "remind") out.actions.push({ id: app.id, ...(await depositReminder(app, e, app.decision, act, schema, now, log)) });
         if (act.action === "expired") out.actions.push({ id: app.id, ...(await holdExpired(app, e, act, now, log)) });
@@ -701,11 +710,22 @@ export async function markDepositPaid(appId, { amount, reference = "", by = "adm
   const { enrolment: e, decision: d } = await readEnrolment(appId);
   if (d?.outcome !== "accepted" || !e.offer) throw bad("Accept the application first (that sets the offer the plan is built from).", 409);
   if (["paid", "processing"].includes(e.deposit?.status) || e.prepaid) throw bad("The deposit is already recorded.", 409);
-  const fee = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
+  const fee = paidSoFar(app, e, (await dealPaid(app, { fresh: true }))?.total);
   const amt = Math.round((Number(amount) || P.depositFor(fee)) * 100) / 100;
   if (amt <= 0) throw bad("Enter the amount paid.");
+  return recordPrepaid(app, { total: fee + amt, deposit: amt, reference, by, source: "admissions" }, schema, { log });
+}
+
+/** Deposit in (marked by admissions, or seen on the HubSpot deal): deal → Deposit Paid, note, "choose your plan" email. */
+async function recordPrepaid(app, { total, deposit = null, reference = "", by = "admissions", source }, schema, { log = console } = {}) {
+  const appId = app.id;
   const at = new Date().toISOString();
-  await patchEnrolment(appId, { prepaid: { amount: amt, reference: String(reference || "").trim().slice(0, 120) || null, at, by: String(by).slice(0, 120) } });
+  const amt = deposit ?? Math.max(0, total - (Number(schema?.settings?.appFee ?? 250)));
+  const claimed = await db().query(
+    `UPDATE applications SET enrolment = enrolment || jsonb_build_object('prepaid', $2::jsonb), updated_at = now()
+      WHERE id = $1 AND NOT (enrolment ? 'prepaid') RETURNING id`,
+    [appId, JSON.stringify({ amount: amt, total, reference: String(reference || "").trim().slice(0, 120) || null, at, by: String(by).slice(0, 120), source })]);
+  if (!claimed.length) return { skipped: "already recorded" };
   let stage = null;
   if (hubspotOn() && app.hubspot_deal_id) {
     try {
@@ -715,12 +735,14 @@ export async function markDepositPaid(appId, { amount, reference = "", by = "adm
       if (st && R.isForward(pipe, deal?.properties?.dealstage, st)) { await HS.updateDeal(app.hubspot_deal_id, { dealstage: st.id }); stage = st.label; }
     } catch (err) { log.error?.("[mark deposit hubspot]", err.message); }
   }
-  await note(app, `<p><strong>Deposit marked paid</strong> by ${esc(by)} — ${usd(amt)}${reference ? ` (${esc(reference)})` : ""}, paid outside the acceptance page. The family has been asked to choose how to pay the rest.</p>`, log);
+  await note(app, source === "hubspot"
+    ? `<p><strong>Deposit found on the deal</strong> — ${usd(total)} paid so far (payment fields), outside the acceptance page. The family has been asked to choose how to pay the rest.</p>`
+    : `<p><strong>Deposit marked paid</strong> by ${esc(by)} — ${usd(amt)}${reference ? ` (${esc(reference)})` : ""}, paid outside the acceptance page. The family has been asked to choose how to pay the rest.</p>`, log);
   let email = null;
   try { email = await familyEmail(app, schema, "choosePlan", { deposit: usd(amt) }, { log }); }
   catch (err) { log.error?.("[mark deposit email]", err.message); email = { error: String(err.message).slice(0, 300) }; }
   await patchEnrolment(appId, { prepaidEmail: email });
-  return { amount: amt, stage, email };
+  return { prepaid: true, amount: amt, total, stage, email };
 }
 
 /** Admissions: paid outside Stripe (e.g. a bank transfer) — mark it so it isn't charged too. */
@@ -743,17 +765,19 @@ export async function appForPortal({ dealId, email }) {
 }
 
 /** What the student portal shows about the payment plan. Pure (tested). */
-export function portalPlan(app) {
+export function portalPlan(app, { dealTotal = null } = {}) {
   const e = app?.enrolment || {};
   const d = app?.decision || null;
   // Accepted, deposit not paid yet: the portal sends them to the acceptance
   // page (plan choice, discounts, deposit) instead of its own pay buttons.
   if (d?.outcome === "accepted" && !e.withdrawn && !["paid", "processing"].includes(e.deposit?.status) && app.status !== "withdrawn") {
     const holdUntil = d.holdUntil || e.offer?.holdUntil || null;
-    if (e.prepaid) return { state: "choose", deposit: Number(e.prepaid.amount), holdPassed: false, start: e.offer?.start || null };
+    const paid = paidSoFar(app, e, dealTotal);
+    if (e.prepaid || paid >= P.DEPOSIT_TOTAL) return { state: "choose", paid, deposit: Number(e.prepaid?.amount) || Math.max(0, paid - 250), holdPassed: false, start: e.offer?.start || null };
     return {
       state: "offer",
-      deposit: P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0),
+      paid,
+      deposit: P.depositFor(paid),
       holdUntil, holdPassed: !!(holdUntil && new Date(holdUntil) < new Date()),
       start: e.offer?.start || d.offer?.start || null,
     };

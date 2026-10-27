@@ -11,6 +11,7 @@ import { publishedSchema } from "./_lib/db.mjs";
 import * as A from "./_lib/applications.mjs";
 import * as E from "./_lib/enrol.mjs";
 import * as PAY from "./_lib/payments.mjs";
+import { dealPaid } from "./_lib/deal-paid.mjs";
 import { publishedTermsOrNull } from "./_lib/terms.mjs";
 
 export const config = { path: "/api/accept/*" };
@@ -29,7 +30,8 @@ export default async (req) => {
       if (sid) { await E.confirmReturn(app, sid, schema); await PAY.confirmReturn(app, sid, schema); }
       const { enrolment, decision } = await E.readEnrolment(app.id);
       const terms = await publishedTermsOrNull();
-      return json({ offer: E.offerView(app, { enrolment, decision }, schema, terms) });
+      const dealTotal = (await dealPaid(app))?.total ?? null;
+      return json({ offer: E.offerView(app, { enrolment, decision, dealTotal }, schema, terms) });
     }
     if (req.method === "POST" && route === "checkout") {
       const body = await readJson(req);

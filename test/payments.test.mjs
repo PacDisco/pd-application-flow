@@ -416,6 +416,13 @@ await t('student portal: accepted but no deposit yet → "offer" (confirm your p
   assert.equal(mails.filter((m, i) => i >= before && m.to.includes('portaloffer')).length, 0);
 });
 
+await t('portalPlan: what the deal says is paid decides "offer" vs "choose"', () => {
+  const app = { paid_at: new Date(), payment: { base: 250 }, status: 'paid', decision: { outcome: 'accepted', holdUntil: new Date(Date.now() + 864e5).toISOString() }, enrolment: { offer: { start: '2027-09-09' } } };
+  assert.deepEqual([PAY.portalPlan(app).state, PAY.portalPlan(app).deposit], ['offer', 2250]);
+  assert.deepEqual([PAY.portalPlan(app, { dealTotal: 1250 }).state, PAY.portalPlan(app, { dealTotal: 1250 }).deposit], ['offer', 1250]);
+  assert.equal(PAY.portalPlan(app, { dealTotal: 2500 }).state, 'choose');
+});
+
 await t('student portal: plan by deal for the student or a parent only; a fresh link on request', async () => {
   const { id, deal } = await enrolled('portal@x.org');
   const get = async (q) => (await (await service(new Request(`https://apply.example.org/api/service/plan?${q}`, { headers: { 'x-apply-key': 'svc' } }))).json());

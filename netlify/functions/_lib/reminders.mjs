@@ -22,6 +22,7 @@ import * as A from "./applications.mjs";
 import { mailOn, sendFeeReminder } from "./notify.mjs";
 import { logFamilyEmail } from "./email-log.mjs";
 import { refreshInterview } from "./interview-check.mjs";
+import { dealPaid } from "./deal-paid.mjs";
 import { FEE_REMINDER_DAYS, FEE_CLOSE_DAYS, emailTemplate } from "../../../public/terms-kit.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -137,6 +138,14 @@ export async function runReminders({ schema, now = new Date(), log = console } =
     if (act.action === "skip") { await markSkipped(app.id, [...act.skip, act.stage]); out.skipped++; continue; }
     if (act.action !== "send") continue;
     if (out.sent >= MAX_SENDS_PER_RUN) { out.deferred = (out.deferred || 0) + 1; continue; }
+    // Paid another way (the portal, a bank transfer)? It's on the HubSpot deal:
+    // stop reminding them.
+    const dp = await dealPaid(app, { fresh: true });
+    if (dp && dp.total >= Number(schema?.settings?.appFee ?? 250)) {
+      await db().query(`UPDATE applications SET reminders = reminders || jsonb_build_object('stopped', jsonb_build_object('at', now(), 'by', 'paid on the HubSpot deal', 'paid', $2::numeric)) WHERE id = $1`, [app.id, dp.total]);
+      out.paidOnDeal = (out.paidOnDeal || 0) + 1;
+      continue;
+    }
     if (!(await claim(app.id, act.stage, act.skip))) continue;
     // Booked from an email or by admissions? Then the email says "pay the fee"
     // rather than "book your interview".

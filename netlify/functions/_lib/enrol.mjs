@@ -28,6 +28,7 @@ import { createDepositCheckout, createSetupCheckout, getCheckoutSession, getPaym
 import { mailOn, alertOn, sendEnrolled, sendDepositAlert } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
+import { dealPaid } from "./deal-paid.mjs";
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 const DAY = 864e5;
@@ -69,7 +70,7 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   const dates = await programDates(app);
   if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — the HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
-  const paid = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
+  const paid = paidSoFar(app, {}, (await dealPaid(app, { fresh: true }))?.total);
   return {
     tuition, paid, deposit: P.depositFor(paid), discounts: planDiscounts(schema, app),
     start: dates.start, end: dates.end, programRecordId: dates.recordId,
@@ -102,12 +103,21 @@ export function planDiscounts(schema, app) {
 /** Pay-in-full discount alone (kept for callers of the first version). */
 export const payInFullDiscount = (schema, app) => planDiscounts(schema, app).full;
 
+/**
+ * Paid toward tuition so far: the most of what pd-apply recorded (the fee),
+ * what admissions marked paid, and what the HubSpot deal's payment fields say.
+ */
+export function paidSoFar(app, enrolment = {}, dealTotal = null) {
+  const fee = app?.paid_at ? Number(app.payment?.base ?? 250) : 0;
+  return Math.max(fee, Number(enrolment?.prepaid?.total) || 0, Number(dealTotal) || 0);
+}
+
 export function acceptLink(token) {
   return `${siteUrl()}/accept?token=${encodeURIComponent(token)}`;
 }
 
 /** What the acceptance page shows. Pure apart from `now`. */
-export function offerView(app, { enrolment = {}, decision = null } = {}, schema, terms, now = new Date()) {
+export function offerView(app, { enrolment = {}, decision = null, dealTotal = null } = {}, schema, terms, now = new Date()) {
   const base = {
     firstName: app.answers?.preferredName || app.first_name || "",
     name: `${app.first_name || ""} ${app.last_name || ""}`.trim(),
@@ -137,11 +147,11 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   if (decision?.outcome !== "accepted" || !enrolment.offer) return { ...base, state: "none" };
   // What's been paid toward it can change after acceptance (the fee paid late),
   // so it's worked out now rather than taken from the stored offer.
-  const paidNow = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
-  // Deposit already paid another way (admissions → Mark deposit paid): they
-  // only choose how to pay the rest; nothing more is due today for most plans.
-  const prepaid = Number(enrolment.prepaid?.amount) || 0;
-  const o = { ...enrolment.offer, paid: paidNow + prepaid, deposit: Math.max(0, P.depositFor(paidNow) - prepaid) };
+  // Already paid (fee, deposit, more) from pd-apply, admissions or the HubSpot
+  // deal. Once the deposit is in they only choose how to pay the rest.
+  const paidNow = paidSoFar(app, enrolment, dealTotal);
+  const prepaid = paidNow >= P.DEPOSIT_TOTAL ? paidNow : 0;
+  const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
   const holdUntil = decision.holdUntil || o.holdUntil;
   const expired = !prepaid && holdUntil && new Date(holdUntil) < now;
   // Discounts: what they were offered at acceptance, or today's settings if
@@ -155,7 +165,7 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   return {
     ...base, state: expired ? "expired" : "offer",
     tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, end: o.end, holdUntil,
-    ...(prepaid ? { prepaid, feePaid: paidNow } : {}),
+    ...(prepaid ? { prepaid } : {}),
     balance: opts.balance, daysToStart: opts.daysToStart, options: opts.options, rates,
     terms: terms ? { version: terms.version, title: terms.title, url: `${siteUrl()}/terms?v=${terms.version}` } : null,
   };
@@ -167,7 +177,8 @@ const PLAN_LABEL = { monthly: "Monthly payments", two: "Two instalments", full: 
 export async function startCheckout(app, { plan, method, agree, token }, schema, now = new Date()) {
   const { enrolment, decision } = await readEnrolment(app.id);
   const terms = await publishedTermsOrNull();
-  const view = offerView(app, { enrolment, decision }, schema, terms, now);
+  const dealTotal = (await dealPaid(app, { fresh: true }))?.total ?? null;
+  const view = offerView(app, { enrolment, decision, dealTotal }, schema, terms, now);
   if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
   if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
   if (view.state !== "offer") throw bad("There's no offer to confirm on this application.", 409);
@@ -182,7 +193,7 @@ export async function startCheckout(app, { plan, method, agree, token }, schema,
     : option.payments[0].amount > view.deposit ? `Deposit + first instalment — ${program}` : `Deposit — ${program}`;
   const ret = acceptLink(token);
   const currency = String(schema.settings?.currency || "usd").toLowerCase();
-  const pendingBase = { plan, method, option, rate, charge, termsVersion: terms?.version || null, agreedAt: now.toISOString(), at: now.toISOString() };
+  const pendingBase = { plan, method, option, rate, charge, prepaid: view.prepaid || 0, termsVersion: terms?.version || null, agreedAt: now.toISOString(), at: now.toISOString() };
   if (charge.base <= 0) {
     // Deposit already paid, nothing due today.
     if (option.payments.some((p) => p.kind === "instalment")) {
@@ -245,20 +256,20 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
       if (pm?.type) method = pm.type === "us_bank_account" ? "ach" : "card";
     }
   } catch { /* not needed to confirm the place */ }
-  const prepaid = enrolment.prepaid || null;
+  const prepaid = choice.prepaid ? { total: choice.prepaid, reference: enrolment.prepaid?.reference || "on the HubSpot deal", at: enrolment.prepaid?.at || null } : null;
   const paidAt = new Date().toISOString();
   const today = choice.option.payments[0];
   let schedule = choice.option.payments.map((p, i) => ({ ...p, status: i === 0 ? status : p.manual ? "due" : "scheduled" }));
   if (prepaid) {
     // The deposit row is what they paid another way; anything charged today is a first instalment.
     schedule = [
-      { due: String(prepaid.at || paidAt).slice(0, 10), amount: Number(prepaid.amount), kind: "deposit", status: "paid", reference: prepaid.reference || null, method: "manual" },
+      { due: String(prepaid.at || paidAt).slice(0, 10), amount: Number(prepaid.total), kind: "deposit", status: "paid", reference: prepaid.reference || null, method: "manual", label: "Paid before choosing a plan" },
       ...(today.amount > 0 ? [{ ...today, kind: "instalment", status, ...(status === "paid" ? { paidAt, reference: session.payment_intent || session.id } : {}) }] : []),
       ...schedule.slice(1),
     ];
   }
   const deposit = prepaid
-    ? { amount: Number(prepaid.amount), fee: 0, total: Number(prepaid.amount), method: "manual", reference: prepaid.reference || "paid outside Stripe", outside: true,
+    ? { amount: Number(prepaid.total), fee: 0, total: Number(prepaid.total), method: "manual", reference: prepaid.reference || "paid outside Stripe", outside: true,
         sessionId: session.id, status, paidAt: prepaid.at || paidAt, ...(today.amount > 0 ? { todayAmount: choice.charge.total, todayReference: session.payment_intent || session.id } : {}),
         ...(choice.option?.discount ? { discount: choice.option.discount, discountPlan: choice.plan } : {}) }
     : {

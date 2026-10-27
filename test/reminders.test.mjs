@@ -189,6 +189,22 @@ await t('each reminder is logged on HubSpot — with the personal login link rem
   } finally { delete process.env.HUBSPOT_TOKEN; up.restore(); }
 });
 
+await t('fee paid another way (on the HubSpot deal): no reminder, reminders stopped', async () => {
+  const { fakeUpstreams } = await import('./harness.mjs');
+  const up = fakeUpstreams();
+  process.env.HUBSPOT_TOKEN = 'x';
+  try {
+    const id = await insertApp('portalfee@x.org', 1.3);
+    up.crm.deals.set('777', { id: '777', properties: { pipeline: '1', dealstage: 'a1', payment_1: '250, pi_portal, 2026-10-20' } });
+    await pool.query(`UPDATE applications SET hubspot_contact_id = 'C7', hubspot_deal_id = '777' WHERE id = $1`, [id]);
+    const before = mails.length;
+    const out = await R.runReminders({ schema, now, log: { error() {} } });
+    assert.equal(out.paidOnDeal, 1);
+    assert.equal(mails.filter((m, i) => i >= before && m.to.includes('portalfee')).length, 0);
+    assert.equal((await rem(id)).reminders.stopped.by, 'paid on the HubSpot deal');
+  } finally { delete process.env.HUBSPOT_TOKEN; up.restore(); }
+});
+
 await t('interview check: picks the right HubSpot meeting', async () => {
   const IC = await import('../netlify/functions/_lib/interview-check.mjs');
   const app = { step1_at: ago(5) };

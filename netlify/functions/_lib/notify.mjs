@@ -367,7 +367,8 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     const fullOpt = o.options.find((x) => x.key === "full");
     const twoOpt = o.options.find((x) => x.key === "two");
     const keys = o.options.map((x) => x.key);
-    if (keys.includes("monthly")) howToPay = `You'll pay your ${usd(offer.deposit)} deposit and choose how to pay the rest of your tuition — monthly, in two instalments, or in full.`;
+    if (!(offer.deposit > 0)) howToPay = "We've already received your deposit, so you'll just choose how to pay the rest of your tuition.";
+    else if (keys.includes("monthly")) howToPay = `You'll pay your ${usd(offer.deposit)} deposit and choose how to pay the rest of your tuition — monthly, in two instalments, or in full.`;
     else if (keys.includes("two")) howToPay = `You'll choose to pay your tuition in two instalments or in full.`;
     else howToPay = `As your program starts in less than ${P.TWO_MIN_DAYS} days, the remaining tuition of ${usd(fullOpt.payments[0].amount)}${fullOpt.discount ? ` (after your ${usd(fullOpt.discount)} pay-in-full discount)` : ""} is due when you confirm.`;
     const saves = [];

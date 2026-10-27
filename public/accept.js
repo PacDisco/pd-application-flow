@@ -94,16 +94,16 @@ function render() {
   <section class="card">
     <p class="small" style="margin:0 0 6px">${esc(o.program)}${o.term ? ` · ${esc(o.term)}` : ''}</p>
     <h1 class="serif">${pre ? `Choose your payment plan${o.firstName ? `, ${esc(o.firstName)}` : ''}` : `Congratulations${o.firstName ? `, ${esc(o.firstName)}` : ''}!`}</h1>
-    ${pre ? `<p class="lead">We've received your ${money(o.prepaid)} deposit, so your place on <strong>${esc(o.program)}</strong> (starting ${esc(dateL(o.start))}) is held. Choose how you'd like to pay the rest of your tuition.</p>` : `<p class="lead">You've been accepted to <strong>${esc(o.program)}</strong>, starting ${esc(dateL(o.start))}. ${o.options.length === 1 && o.options[0].key === 'full'
+    ${pre ? `<p class="lead">We've received your deposit, so your place on <strong>${esc(o.program)}</strong> (starting ${esc(dateL(o.start))}) is held. Choose how you'd like to pay the rest of your tuition.</p>` : `<p class="lead">You've been accepted to <strong>${esc(o.program)}</strong>, starting ${esc(dateL(o.start))}. ${o.options.length === 1 && o.options[0].key === 'full'
       ? `As your program starts in less than ${o.daysToStart < 75 ? '75' : '90'} days, please pay your tuition balance by <strong>${esc(dateL(o.holdUntil))}</strong> to confirm your place.`
       : `Confirm your place by paying your ${money(o.deposit)} deposit by <strong>${esc(dateL(o.holdUntil))}</strong>.`}</p>`}
     <table class="sum" aria-label="Your tuition">
       <tr><td>Program tuition</td><td>${money(o.tuition)}</td></tr>
       ${pre
-        ? `${o.feePaid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.feePaid)}</td></tr>` : ''}<tr><td>Deposit (paid)</td><td>−${money(o.prepaid)}</td></tr>
+        ? `<tr><td>Already paid (application fee + deposit)</td><td>−${money(o.prepaid)}</td></tr>
       <tr class="total"><td>Remaining tuition</td><td>${money(o.balance)}</td></tr>`
-        : `${o.paid > 0 ? `<tr><td>Application fee (paid)</td><td>−${money(o.paid)}</td></tr>` : ''}
-      <tr><td>${o.paid > 0 ? 'Deposit' : 'Deposit (includes the application fee)'}</td><td>−${money(o.deposit)}</td></tr>
+        : `${o.paid > 0 ? `<tr><td>${o.paid === 250 ? 'Application fee (paid)' : 'Already paid'}</td><td>−${money(o.paid)}</td></tr>` : ''}
+      <tr><td>${o.paid === 0 ? 'Deposit (includes the application fee)' : o.paid > 250 ? 'Rest of your deposit' : 'Deposit'}</td><td>−${money(o.deposit)}</td></tr>
       <tr class="total"><td>Balance after your deposit</td><td>${money(o.balance)}</td></tr>`}
     </table>
   </section>

@@ -25,6 +25,7 @@ import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
 import { decide, extendHold, resendAcceptance } from "./_lib/decisions.mjs";
 import * as PAY from "./_lib/payments.mjs";
+import { dealPaid } from "./_lib/deal-paid.mjs";
 
 export const config = { path: ["/api/service/*"] };
 
@@ -94,12 +95,12 @@ export default async (req) => {
     }
     if (req.method === "GET" && route === "plan") {
       const app = await PAY.appForPortal({ dealId: url.searchParams.get("dealId"), email: url.searchParams.get("email") });
-      return json({ plan: app ? PAY.portalPlan(app) : null });
+      return json({ plan: app ? PAY.portalPlan(app, { dealTotal: (await dealPaid(app))?.total ?? null }) : null });
     }
     if (req.method === "POST" && route === "plan-link") {
       const b = await req.json();
       const app = await PAY.appForPortal({ dealId: b.dealId, email: b.email });
-      if (!app || !PAY.portalPlan(app)) return json({ error: "No payment plan for this enrolment." }, 404);
+      if (!app || !PAY.portalPlan(app, { dealTotal: (await dealPaid(app))?.total ?? null })) return json({ error: "No payment plan for this enrolment." }, 404);
       return json({ url: await PAY.portalLink(app) });
     }
     if (req.method === "POST" && route === "deposit-mark-paid") {

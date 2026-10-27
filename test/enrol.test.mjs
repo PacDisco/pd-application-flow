@@ -294,7 +294,7 @@ await t('deposit paid another way: admissions marks it → family emailed to cho
   assert.match(m.text, /received your \$2,250 deposit/); assert.match(m.text, /\/accept\?token=/);
   await assert.rejects(PAY.markDepositPaid(id, { by: 'Megan' }, schema), /already recorded/);
   const o = (await offer(token)).body.offer;
-  assert.equal(o.state, 'offer'); assert.equal(o.prepaid, 2250); assert.equal(o.deposit, 0); assert.equal(o.balance, 13000);
+  assert.equal(o.state, 'offer'); assert.equal(o.prepaid, 2500, 'fee + deposit'); assert.equal(o.deposit, 0); assert.equal(o.balance, 13000);
   const monthly = o.options.find((x) => x.key === 'monthly');
   assert.equal(monthly.payments[0].amount, 0);
   assert.equal(monthly.payments.slice(1).reduce((a, p) => a + p.amount, 0), 13000);
@@ -307,7 +307,7 @@ await t('deposit paid another way: admissions marks it → family emailed to cho
   const v = (await offer(token, `&session_id=${s.id}`)).body.offer;
   assert.equal(v.state, 'enrolled');
   const e = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [id])).rows[0].enrolment;
-  assert.deepEqual([e.schedule[0].kind, e.schedule[0].amount, e.schedule[0].status, e.schedule[0].reference], ['deposit', 2250, 'paid', 'Wise 42']);
+  assert.deepEqual([e.schedule[0].kind, e.schedule[0].amount, e.schedule[0].status, e.schedule[0].reference], ['deposit', 2500, 'paid', 'Wise 42']);
   assert.ok(e.schedule.slice(1).every((p) => p.status === 'scheduled'));
   assert.equal(e.stripe.paymentMethod, 'pm_saved'); assert.equal(e.deposit.outside, true); assert.equal(e.choice.plan, 'monthly');
   assert.ok(!Object.values(up.crm.deals.get(deal).properties).some((x) => /^2250, /.test(String(x))), 'deposit not logged twice on the deal');
@@ -325,6 +325,37 @@ await t('deposit paid another way: "balance later" needs no Stripe; "full" charg
   await PAY.markDepositPaid(b.id, { amount: 2250, by: 'Megan' }, schema);
   const f = sessionOf((await checkout({ token: b.token, plan: 'full', method: 'card', agree: true })).body.url);
   assert.equal(f.mode, 'payment'); assert.equal(f.amount_total, 1300000 + 45500);
+});
+
+await t('deposit already on the HubSpot deal (e.g. paid in the portal): page goes straight to choosing a plan; the hourly run emails them once', async () => {
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  const DP = await import('../netlify/functions/_lib/deal-paid.mjs');
+  const a = await acceptedApp('portalpaid@x.org');
+  Object.assign(up.crm.deals.get(a.deal).properties, { payment_1: '250, pi_fee, 2026-10-18', payment_2: '2250, pi_portal_dep, 2026-10-25' });
+  DP.__clearDealPaidCache();
+  const o = (await offer(a.token)).body.offer;
+  assert.equal(o.prepaid, 2500); assert.equal(o.deposit, 0);
+  assert.equal(o.options.find((x) => x.key === 'monthly').payments[0].amount, 0);
+  await pool.query(`UPDATE applications SET status = 'withdrawn' WHERE email <> 'portalpaid@x.org'`);
+  const before = mails.length;
+  await PAY.runPayments({ schema, log: { error() {}, warn() {} } });
+  await PAY.runPayments({ schema, log: { error() {}, warn() {} } });
+  const sent = mails.slice(before);
+  assert.equal(sent.length, 1, 'one "choose your plan" email');
+  assert.match(sent[0].subject, /choose how to pay the rest/);
+  assert.equal(up.crm.deals.get(a.deal).properties.dealstage, 'f9d');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Deposit found on the deal/);
+});
+
+await t('part of the deposit on the deal: only the rest is due', async () => {
+  const DP = await import('../netlify/functions/_lib/deal-paid.mjs');
+  const a = await acceptedApp('partdep@x.org');
+  Object.assign(up.crm.deals.get(a.deal).properties, { payment_1: '250, pi_fee, 2026-10-18', payment_2: '1000, Wise 9, 2026-10-25' });
+  DP.__clearDealPaidCache();
+  const o = (await offer(a.token)).body.offer;
+  assert.equal(o.paid, 1250); assert.equal(o.deposit, 1250);
+  const s = sessionOf((await checkout({ token: a.token, plan: 'monthly', method: 'ach', agree: true })).body.url);
+  assert.equal(s.amount_total, 125000 + 1250, '$1,250 + 1% bank fee');
 });
 
 await t('pay-in-full discount by program type; off → none', async () => {

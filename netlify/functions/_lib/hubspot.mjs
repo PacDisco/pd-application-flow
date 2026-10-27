@@ -192,7 +192,7 @@ export async function propertyOptions(objectType, name) {
 
 // ── deals ──────────────────────────────────────────────────────────────────
 
-const DEAL_PROPS = ["dealname", "pipeline", "dealstage", "amount", "pd_program", "travel_year", "createdate", ...Array.from({ length: 10 }, (_, i) => `payment_${i + 1}`)];
+const DEAL_PROPS = ["dealname", "pipeline", "dealstage", "amount", "pd_program", "travel_year", "createdate", "total_amount_paid", ...Array.from({ length: 10 }, (_, i) => `payment_${i + 1}`)];
 
 export async function getDeal(id) {
   return hs(`/crm/v3/objects/deals/${id}?properties=${DEAL_PROPS.join(",")}`);

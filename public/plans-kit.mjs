@@ -14,8 +14,12 @@
 export const DEPOSIT = 2250;
 /** Application fee + deposit. Someone accepted before paying the fee pays it all as their deposit. */
 export const DEPOSIT_TOTAL = 2500;
-/** The deposit to charge, given what's already been paid toward it (the fee). */
-export const depositFor = (paid = 0) => Math.max(DEPOSIT, DEPOSIT_TOTAL - (Number(paid) || 0));
+/**
+ * The deposit still to pay, given what's already been paid toward tuition
+ * (the fee, or more — anything on the HubSpot deal): $2,250 after the fee,
+ * $2,500 without it, nothing once $2,500 is in.
+ */
+export const depositFor = (paid = 0) => Math.max(0, Math.round((DEPOSIT_TOTAL - (Number(paid) || 0)) * 100) / 100);
 export const PLAN_END_DAYS = 60;
 export const LUMP_DUE_DAYS = 90;
 export const MONTHLY_MIN_DAYS = 90;
