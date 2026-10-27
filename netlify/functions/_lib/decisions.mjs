@@ -125,21 +125,13 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
 
   // ── after the decision is stored: email, HubSpot (best-effort, recorded) ──
   if (outcome === "accepted") {
-    await patchEnrolment(app.id, { offer: decision.offer });
-    if (mailOn() && emailTemplate(schema, "accepted").enabled) {
-      try {
-        const token = await A.addLinkToken(app.id);
-        const link = acceptLink(token);
-        const terms = await publishedTermsOrNull();
-        const msg = await sendAccepted(app, schema, { offer: decision.offer, link, terms, message: decision.message });
-        // The logged copy must not carry the personal link (it signs them in).
-        const scrub = (x) => String(x || "").split(link).join(acceptLink("")).split(link.replace(/&/g, "&amp;")).join(acceptLink(""));
-        decision.email = { to: msg.to, at: new Date().toISOString(), hubspot: await logFamilyEmail(app, { ...msg, text: scrub(msg.text), html: scrub(msg.html) }) };
-      } catch (err) {
-        log.error?.("[decision email]", err.message);
-        decision.email = { error: String(err.message).slice(0, 300), at: new Date().toISOString() };
-      }
+    try { await patchEnrolment(app.id, { offer: decision.offer }); }
+    catch (err) {
+      // e.g. MIGRATION-enrolment.sql not run: no acceptance page without it.
+      log.error?.("[decision offer]", err.message);
+      decision.offerError = String(err.message).slice(0, 300);
     }
+    if (!decision.offerError && mailOn() && emailTemplate(schema, "accepted").enabled) decision.email = await acceptanceEmail(app, decision, schema, log);
   }
   if (outcome === "declined" && mailOn() && emailTemplate(schema, "declined").enabled) {
     try {
@@ -167,6 +159,55 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
   }
   await writeDecision(app.id, decision);
   return decision;
+}
+
+async function acceptanceEmail(app, decision, schema, log = console) {
+  try {
+    const token = await A.addLinkToken(app.id);
+    const link = acceptLink(token);
+    const terms = await publishedTermsOrNull();
+    const msg = await sendAccepted(app, schema, { offer: decision.offer, link, terms, message: decision.message });
+    // The logged copy must not carry the personal link (it signs them in).
+    const scrub = (x) => String(x || "").split(link).join(acceptLink("")).split(link.replace(/&/g, "&amp;")).join(acceptLink(""));
+    return { to: msg.to, at: new Date().toISOString(), hubspot: await logFamilyEmail(app, { ...msg, text: scrub(msg.text), html: scrub(msg.html) }) };
+  } catch (err) {
+    log.error?.("[decision email]", err.message);
+    return { error: String(err.message).slice(0, 300), at: new Date().toISOString() };
+  }
+}
+
+/**
+ * Admissions: send the acceptance email (again) — when it failed, never went,
+ * or the family lost it. Re-creates the offer for the acceptance page if it's
+ * missing. Each send has a fresh personal link; earlier links keep working.
+ */
+export async function resendAcceptance(appId, { by = "admissions" } = {}, { schema, log = console, now = new Date() } = {}) {
+  const app = await A.byId(appId);
+  if (!app) throw bad("Application not found.", 404);
+  const d = await readDecision(app.id);
+  if (d?.outcome !== "accepted") throw bad("This application hasn't been accepted.", 409);
+  if (!mailOn()) throw bad("Email isn't set up on pd-apply (SMTP_USER / SMTP_PASS).", 500);
+  const next = { ...d };
+  if (!next.offer) {
+    next.offer = await makeOffer(app, schema, { holdDays: holdDays(schema), now });
+    next.holdUntil = next.offer.holdUntil;
+  }
+  // A hold that has already passed is extended so the link works when it arrives.
+  if (next.holdUntil && new Date(next.holdUntil) < now) {
+    next.holdUntil = new Date(now.getTime() + holdDays(schema) * 864e5).toISOString();
+    next.offer = { ...next.offer, holdUntil: next.holdUntil };
+  }
+  await patchEnrolment(app.id, { offer: next.offer });
+  delete next.offerError;
+  next.email = await acceptanceEmail(app, next, schema, log);
+  if (next.email.error) { await writeDecision(app.id, next); throw bad(`Email not sent: ${next.email.error}`, 502); }
+  next.resent = [...(d.resent || []), { at: now.toISOString(), by: String(by).slice(0, 120) }];
+  if (hubspotOn()) {
+    try { await HS.addNote(`<p><strong>Acceptance email sent</strong> by ${esc(by)} to ${esc(next.email.to.join(", "))}. Place held until ${esc(new Date(next.holdUntil).toDateString())}.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); }
+    catch (err) { log.error?.("[resend note]", err.message); }
+  }
+  await writeDecision(app.id, next);
+  return next;
 }
 
 /** Admissions extends the hold on an accepted applicant's place (default 7 more days from now). */

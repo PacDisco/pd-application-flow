@@ -90,6 +90,24 @@ await t('accept before the fee is paid: deposit is $2,500 (fee included); deal m
   assert.match(up.crm.notes.at(-1).properties.hs_note_body, /\$2,500 deposit \(application fee not paid/);
 });
 
+await t('resend acceptance: an accepted applicant with no email / offer (e.g. accepted before the migration) gets one, hold extended', async () => {
+  const id = await insertApp('resend@x.org');
+  await pool.query(`UPDATE applications SET decision = $2 WHERE id = $1`, [id, JSON.stringify({ outcome: 'accepted', at: '2026-10-20T00:00:00Z', by: 'admissions', holdUntil: '2026-10-21T00:00:00Z' })]);
+  const before = mails.length;
+  const res = await service(new Request('https://apply.example.org/api/service/resend-acceptance', { method: 'POST', headers: { 'x-apply-key': 'svc', 'content-type': 'application/json' }, body: JSON.stringify({ id, by: 'Megan' }) }));
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(mails.length, before + 1);
+  assert.match(mails.at(-1).text, /\/accept\?token=/);
+  const d = await decision(id);
+  assert.equal(d.offer.start, '2027-09-09');
+  assert.ok(new Date(d.holdUntil) > new Date(), 'hold extended');
+  assert.equal(d.email.to.length, 2); assert.equal(d.resent[0].by, 'Megan');
+  const en = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [id])).rows[0].enrolment;
+  assert.equal(en.offer.start, '2027-09-09');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Acceptance email sent.*Megan/);
+});
+
 await t('accept is refused (nothing stored, no email) without a program start date', async () => {
   up.crm.programs.push({ id: 'P0', properties: { pacific_discovery_program: 'South America Semester' } });
   const id = await insertApp('nodate@x.org', { record: 'P0' });
