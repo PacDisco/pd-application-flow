@@ -711,11 +711,24 @@ export async function appForPortal({ dealId, email }) {
 /** What the student portal shows about the payment plan. Pure (tested). */
 export function portalPlan(app) {
   const e = app?.enrolment || {};
+  const d = app?.decision || null;
+  // Accepted, deposit not paid yet: the portal sends them to the acceptance
+  // page (plan choice, discounts, deposit) instead of its own pay buttons.
+  if (d?.outcome === "accepted" && !e.withdrawn && !["paid", "processing"].includes(e.deposit?.status) && app.status !== "withdrawn") {
+    const holdUntil = d.holdUntil || e.offer?.holdUntil || null;
+    return {
+      state: "offer",
+      deposit: P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0),
+      holdUntil, holdPassed: !!(holdUntil && new Date(holdUntil) < new Date()),
+      start: e.offer?.start || d.offer?.start || null,
+    };
+  }
   if (!e.deposit || !["paid", "processing"].includes(e.deposit.status)) return null;
   const sched = (e.schedule || []).map((p, i) => ({ index: i, due: p.due, amount: p.amount, kind: p.kind, manual: !!p.manual, status: p.status, paidAt: p.paidAt || null, total: p.total ?? null }));
   const open = sched.filter((p) => p.index > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status));
   const next = open.filter((p) => p.status === "scheduled" || p.status === "due").sort((a, b) => a.due.localeCompare(b.due))[0] || null;
   return {
+    state: "plan",
     plan: e.choice?.plan || null,
     planName: { monthly: "Monthly payments", two: "Two instalments", full: "Paid in full", later: "Deposit now, balance later" }[e.choice?.plan] || "",
     method: e.choice?.method === "ach" ? "ach" : "card",

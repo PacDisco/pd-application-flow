@@ -400,11 +400,19 @@ await t('admissions marks a bank transfer as paid: it is never charged', async (
   assert.equal((await svc('payment-mark-paid', { id, item: 1, by: 'Megan' })).status, 409);
 });
 
+await t('student portal: accepted but no deposit yet → "offer" (confirm your place), with the right deposit', async () => {
+  const { deal } = await accepted('portaloffer@x.org');
+  const res = await service(new Request(`https://apply.example.org/api/service/plan?dealId=${deal}&email=portaloffer@x.org`, { headers: { 'x-apply-key': 'svc' } }));
+  const { plan } = await res.json();
+  assert.equal(plan.state, 'offer'); assert.equal(plan.deposit, 2250); assert.equal(plan.holdPassed, false);
+  assert.equal((await svc('plan-link', { dealId: deal, email: 'portaloffer@x.org' })).status, 200);
+});
+
 await t('student portal: plan by deal for the student or a parent only; a fresh link on request', async () => {
   const { id, deal } = await enrolled('portal@x.org');
   const get = async (q) => (await (await service(new Request(`https://apply.example.org/api/service/plan?${q}`, { headers: { 'x-apply-key': 'svc' } }))).json());
   const mine = await get(`dealId=${deal}&email=portal@x.org`);
-  assert.equal(mine.plan.plan, 'monthly'); assert.equal(mine.plan.schedule.length, 9);
+  assert.equal(mine.plan.state, 'plan'); assert.equal(mine.plan.plan, 'monthly'); assert.equal(mine.plan.schedule.length, 9);
   assert.equal(mine.plan.remaining, 13000); assert.equal(mine.plan.next.amount, 1625); assert.equal(mine.plan.automatic, true);
   assert.equal((await get(`dealId=${deal}&email=PARENT.portal@x.org`)).plan.plan, 'monthly', 'a parent, any case');
   assert.equal((await get(`dealId=${deal}&email=someone@else.org`)).plan, null);
