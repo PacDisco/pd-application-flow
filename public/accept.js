@@ -67,8 +67,13 @@ function render() {
   const later = sel.payments.slice(1);
   const describe = (x) => {
     const rest = x.payments.slice(1);
-    if (x.key === 'full') return `Pay the full ${money(x.payments[0].amount)} today — nothing more to pay.`;
+    if (x.key === 'full') return x.discount
+      ? `Pay ${money(x.payments[0].amount)} today instead of ${money(x.fullPrice)} — nothing more to pay.`
+      : `Pay the full ${money(x.payments[0].amount)} today — nothing more to pay.`;
     if (x.key === 'later') return `${money(x.payments[0].amount)} today, then ${money(rest[0].amount)} by ${dateL(rest[0].due)}.`;
+    if (x.key === 'two' && x.discount) return (x.payments[0].amount > o.deposit
+      ? `${money(x.payments[0].amount)} today (deposit + first half), then ${money(rest[0].amount)} on ${dateL(rest[0].due)}`
+      : `${money(o.deposit)} deposit today, then ${money(rest[0].amount)} on ${dateL(rest[0].due)} and ${money(rest[1].amount)} on ${dateL(rest[1].due)}`) + ` — ${money(x.discount)} off your final payment.`;
     if (x.key === 'two') return x.payments[0].amount > o.deposit
       ? `${money(x.payments[0].amount)} today (deposit + first half), then ${money(rest[0].amount)} on ${dateL(rest[0].due)}.`
       : `${money(o.deposit)} deposit today, then ${money(rest[0].amount)} on ${dateL(rest[0].due)} and ${money(rest[1].amount)} on ${dateL(rest[1].due)}.`;
@@ -92,7 +97,7 @@ function render() {
     <h2 class="serif">How would you like to pay?</h2>
     <div class="opts" role="radiogroup" aria-label="Payment plan">
       ${main.map((x, i) => `<label class="opt" data-on="${x.key === S.plan}"><input type="radio" name="plan" value="${x.key}"${x.key === S.plan ? ' checked' : ''}>
-        <span><span class="t">${esc(x.label)}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span></span></label>`).join('')}
+        <span><span class="t">${esc(x.label.replace(/ — save .*/, ''))}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}${x.discount ? `<span class="tag tag--save">Save ${money(x.discount)}</span>` : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span></span></label>`).join('')}
     </div>
     ${quiet ? `<p style="margin:4px 0 0"><button type="button" class="quiet" id="later">${S.plan === 'later' ? '✓ ' : ''}Or pay the ${money(o.deposit)} deposit now and the balance by ${esc(dateL(quiet.payments[1].due))}</button></p>` : ''}
     ${later.length ? `<details style="margin-top:14px"${S.plan === 'later' ? ' open' : ''}><summary class="small">Payment schedule</summary><table class="sched">
@@ -106,7 +111,7 @@ function render() {
       <label class="opt" data-on="${S.method === 'ach'}"><input type="radio" name="method" value="ach"${S.method === 'ach' ? ' checked' : ''}><span><span class="t">US bank account</span><span class="d" style="display:block">${o.rates.ach ? `${pct(o.rates.ach)} fee` : 'No fee'} · takes a few days to clear</span></span></label>
     </div>
     <table class="sum" aria-label="Today">
-      <tr><td>${sel.key === 'full' ? 'Tuition balance' : sel.payments[0].amount > o.deposit ? 'Deposit + first instalment' : 'Deposit'}</td><td>${money(charge.base)}</td></tr>
+      ${sel.discount && sel.key === 'full' ? `<tr><td>Tuition balance</td><td>${money(sel.fullPrice)}</td></tr><tr><td>Pay-in-full discount</td><td>−${money(sel.discount)}</td></tr>` : `<tr><td>${sel.key === 'full' ? 'Tuition balance' : sel.payments[0].amount > o.deposit ? 'Deposit + first instalment' : 'Deposit'}</td><td>${money(charge.base)}</td></tr>`}
       ${charge.fee ? `<tr><td>${S.method === 'ach' ? 'Bank payment fee' : 'Card processing fee'} (${pct(o.rates[S.method])})</td><td>${money(charge.fee)}</td></tr>` : ''}
       <tr class="total"><td>Today</td><td>${money(charge.total)}</td></tr>
     </table>

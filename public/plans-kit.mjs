@@ -20,6 +20,8 @@ export const PLAN_END_DAYS = 60;
 export const LUMP_DUE_DAYS = 90;
 export const MONTHLY_MIN_DAYS = 90;
 export const TWO_MIN_DAYS = 75;
+/** Plan discounts (pay in full / two instalments) end this many days before the start. */
+export const DISCOUNT_END_DAYS = 60;
 
 const DAY = 864e5;
 const cents = (n) => Math.round(Number(n) * 100);
@@ -59,9 +61,11 @@ export function surcharge(amount, rate) {
  * Returns { balance, daysToStart, options: [{ key, label, primary, payments: [{ due, amount, kind }] }] }
  * `payments[0]` is always what is charged today.
  */
-export function paymentOptions({ tuition, paid = 250, deposit = DEPOSIT, start, today }) {
+export function paymentOptions({ tuition, paid = 250, deposit = DEPOSIT, start, today, discounts = {}, fullDiscount = 0 }) {
   const t = day(today); const s = day(start);
   const daysToStart = Math.round((s - t) / DAY);
+  // Discounts (admissions' settings, fixed in the offer at acceptance) end 60 days out.
+  const disc = daysToStart > DISCOUNT_END_DAYS ? { full: discounts.full ?? fullDiscount, two: discounts.two || 0 } : { full: 0, two: 0 };
   const totalC = cents(tuition) - cents(paid);
   const depositC = Math.min(cents(deposit), totalC);
   const balanceC = totalC - depositC;
@@ -91,9 +95,22 @@ export function paymentOptions({ tuition, paid = 250, deposit = DEPOSIT, start, 
       ? [pay(t, depositC, 'deposit'), pay(addDays(t, 30) < planEnd ? addDays(t, 30) : addDays(planEnd, -14), a, 'instalment'), pay(planEnd, b, 'instalment')]
       // 75–90 days out: the first half goes with the deposit today.
       : [pay(t, depositC + a, 'deposit'), pay(planEnd, b, 'instalment')];
-    options.push({ key: 'two', label: 'Two instalments', primary: !options.length, payments });
+    // Two-instalment discount comes off the final payment, so it's earned by completing the plan.
+    const last = payments[payments.length - 1];
+    const twoC = Math.max(0, Math.min(cents(disc.two), cents(last.amount)));
+    if (twoC) payments[payments.length - 1] = { ...last, amount: dollars(cents(last.amount) - twoC) };
+    options.push({
+      key: 'two', label: twoC ? `Two instalments — save $${(twoC / 100).toLocaleString('en-US')}` : 'Two instalments', primary: !options.length,
+      ...(twoC ? { discount: dollars(twoC), fullPrice: dollars(totalC) } : {}),
+      payments,
+    });
   }
-  options.push({ key: 'full', label: 'Pay in full today', primary: !options.length, payments: [pay(t, totalC, 'deposit')] });
+  const offC = Math.max(0, Math.min(cents(disc.full), balanceC));
+  options.push({
+    key: 'full', label: offC ? `Pay in full today — save $${(offC / 100).toLocaleString('en-US')}` : 'Pay in full today', primary: !options.length,
+    ...(offC ? { discount: dollars(offC), fullPrice: dollars(totalC) } : {}),
+    payments: [pay(t, totalC - offC, 'deposit')],
+  });
   if (daysToStart > LUMP_DUE_DAYS) {
     options.push({
       key: 'later', label: 'Pay the deposit now and the balance later', primary: false, quiet: true,

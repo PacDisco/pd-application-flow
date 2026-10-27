@@ -211,6 +211,72 @@ await t('accepted before paying the fee: $2,500 deposit (fee included); the fee 
   assert.equal(o.paid, 250); assert.equal(o.deposit, 2250);
 });
 
+await t('pay-in-full discount (semester $500): fixed at acceptance, charged on "full" only, deal amount reduced, emails say so', async () => {
+  schema.settings.payInFull = { enabled: true, semester: 500, mini: 250, summer: 0 };
+  const { id, token, deal } = await acceptedApp('payfull@x.org');
+  delete schema.settings.payInFull;
+  assert.match(mails.at(-1).text, /Pay in full and save \$500\./);
+  const o = (await offer(token)).body.offer;
+  const full = o.options.find((x) => x.key === 'full');
+  assert.equal(full.discount, 500); assert.equal(full.payments[0].amount, 15250 - 500);
+  assert.equal(o.options.find((x) => x.key === 'monthly').discount, undefined);
+  const r = await checkout({ token, plan: 'full', method: 'ach', agree: true });
+  const s = sessionOf(r.body.url);
+  assert.equal(s.amount_total, 1475000 + 14750, '$14,750 + 1% bank fee');
+  assert.match(s.form.get('line_items[0][price_data][product_data][name]'), /\$500 pay-in-full discount/);
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  const before = mails.length;
+  await offer(token, `&session_id=${s.id}`);
+  const e = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [id])).rows[0].enrolment;
+  assert.equal(e.deposit.discount, 500);
+  assert.equal(up.crm.deals.get(deal).properties.amount, '15000', 'deal amount = tuition − discount');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /\$500 pay-in-full discount/);
+  assert.match(mails.slice(before).find((m) => m.to.includes('payfull@x.org')).text, /includes your \$500 pay-in-full discount/);
+});
+
+await t('two-instalment discount: off the final payment, deal amount reduced, email says so', async () => {
+  schema.settings.discounts = { enabled: true, full: { semester: 500 }, two: { semester: 250, mini: 100 } };
+  const { id, token, deal } = await acceptedApp('twodisc@x.org');
+  delete schema.settings.discounts;
+  assert.match(mails.at(-1).text, /Pay in full and save \$500, or pay in two instalments and save \$250\./);
+  const o = (await offer(token)).body.offer;
+  const two = o.options.find((x) => x.key === 'two');
+  assert.equal(two.discount, 250); assert.deepEqual(two.payments.map((p) => p.amount), [2250, 6500, 6250]);
+  const r = await checkout({ token, plan: 'two', method: 'card', agree: true });
+  const s = sessionOf(r.body.url);
+  assert.equal(s.amount_total, 225000 + 7875, 'deposit today is unchanged');
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  const before = mails.length;
+  await offer(token, `&session_id=${s.id}`);
+  const e = (await pool.query('SELECT enrolment FROM applications WHERE id = $1', [id])).rows[0].enrolment;
+  assert.equal(e.schedule.at(-1).amount, 6250); assert.equal(e.deposit.discount, 250); assert.equal(e.deposit.discountPlan, 'two');
+  assert.equal(up.crm.deals.get(deal).properties.amount, '15250');
+  const fam = mails.slice(before).find((m) => m.to.includes('twodisc@x.org'));
+  assert.match(fam.text, /\$250 two-instalment discount has been taken off your final payment/);
+  assert.ok(!/pay-in-full discount/.test(fam.text));
+});
+
+await t('discounts end 60 days before the start', async () => {
+  schema.settings.discounts = { enabled: true, full: { semester: 500 }, two: { semester: 250 } };
+  up.crm.programs.push({ id: 'P55', properties: { pacific_discovery_program: 'South America Semester', program_start_date: new Date(Date.now() + 55 * 864e5).toISOString().slice(0, 10) } });
+  const { token } = await acceptedApp('late60@x.org', { record: 'P55' });
+  delete schema.settings.discounts;
+  assert.match(mails.at(-1).text, /remaining tuition of \$15,250 is due/);
+  assert.ok(!/save/.test(mails.at(-1).text));
+  const o = (await offer(token)).body.offer;
+  assert.equal(o.options[0].discount, undefined);
+});
+
+await t('pay-in-full discount by program type; off → none', async () => {
+  const E = await import('../netlify/functions/_lib/enrol.mjs');
+  const st = { settings: { payInFull: { enabled: true, semester: 500, mini: 250, summer: 0 } }, programs: schema.programs };
+  assert.deepEqual(E.planDiscounts({ settings: { discounts: { enabled: true, full: { mini: 250 }, two: { mini: 100 } } }, programs: schema.programs }, { program: 'Hawaii Mini Semester' }), { full: 250, two: 100 });
+  assert.equal(E.payInFullDiscount(st, { program: 'South America Gap Semester' }), 500);
+  assert.equal(E.payInFullDiscount(st, { program: 'Hawaii Mini Semester' }), 250);
+  assert.equal(E.payInFullDiscount(st, { program: 'Bali Summer Program' }), 0);
+  assert.equal(E.payInFullDiscount({ ...st, settings: { payInFull: { ...st.settings.payInFull, enabled: false } } }, { program: 'South America Gap Semester' }), 0);
+});
+
 up.restore();
 await pool.end();
 console.log(`enrol: ${n} passed`);

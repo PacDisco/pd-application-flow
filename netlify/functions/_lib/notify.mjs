@@ -363,11 +363,17 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
   // What they'll be offered on the page depends on how close the start is.
   let howToPay = `You'll pay your ${usd(offer?.deposit ?? 2250)} deposit and choose how to pay the rest of your tuition.`;
   if (offer?.start && offer?.tuition) {
-    const o = P.paymentOptions({ tuition: offer.tuition, paid: offer.paid ?? 250, deposit: offer.deposit, start: offer.start, today: P.iso(now) });
+    const o = P.paymentOptions({ tuition: offer.tuition, paid: offer.paid ?? 250, deposit: offer.deposit, start: offer.start, today: P.iso(now), discounts: offer.discounts || { full: offer.payInFullDiscount || 0 } });
+    const fullOpt = o.options.find((x) => x.key === "full");
+    const twoOpt = o.options.find((x) => x.key === "two");
     const keys = o.options.map((x) => x.key);
     if (keys.includes("monthly")) howToPay = `You'll pay your ${usd(offer.deposit)} deposit and choose how to pay the rest of your tuition — monthly, in two instalments, or in full.`;
     else if (keys.includes("two")) howToPay = `You'll choose to pay your tuition in two instalments or in full.`;
-    else howToPay = `As your program starts in less than ${P.TWO_MIN_DAYS} days, the remaining tuition of ${usd(offer.tuition - (offer.paid ?? 250))} is due when you confirm.`;
+    else howToPay = `As your program starts in less than ${P.TWO_MIN_DAYS} days, the remaining tuition of ${usd(fullOpt.payments[0].amount)}${fullOpt.discount ? ` (after your ${usd(fullOpt.discount)} pay-in-full discount)` : ""} is due when you confirm.`;
+    const saves = [];
+    if (keys.length > 1 && fullOpt?.discount) saves.push(`pay in full and save ${usd(fullOpt.discount)}`);
+    if (twoOpt?.discount) saves.push(`pay in two instalments and save ${usd(twoOpt.discount)}`);
+    if (saves.length) howToPay += ` ${saves.join(", or ").replace(/^./, (c) => c.toUpperCase())}.`;
   }
   const vars = {
     firstName: app.answers?.preferredName || app.first_name || "there",
@@ -414,12 +420,13 @@ export function enrolledContent(app, schema, { enrolment, terms = null } = {}) {
   const rate = Number(e.lastPending?.rate ?? K.surchargeRates(schema)[e.choice?.method === "ach" ? "ach" : "card"]) || 0;
   const feeNote = rate > 0 ? ` A ${(rate * 100).toFixed(1).replace(/\.0$/, "")}% processing fee is added to each ${method} payment.` : "";
   if (auto.length) notes.push(`We'll charge ${auto.length === 1 ? "this" : "these"} automatically to the ${method} you used today and email you 3 days before each payment.${feeNote}`);
+  if (e.deposit?.discount && e.choice?.plan === "two") notes.push(`Your ${usd(e.deposit.discount)} two-instalment discount has been taken off your final payment.`);
   if (manual.length) notes.push(`Please pay the remaining ${usd(manual[0].amount)} by ${shortDate(manual[0].due)} — you can pay any time before then from the student portal.`);
   const vars = {
     firstName: app.answers?.preferredName || app.first_name || "there",
     program: app.program || "your Pacific Discovery program",
     term: app.term || "",
-    paidToday: usd(e.deposit?.total ?? e.deposit?.amount ?? 0),
+    paidToday: `${usd(e.deposit?.total ?? e.deposit?.amount ?? 0)}${e.deposit?.discount && e.choice?.plan !== "two" ? ` (that includes your ${usd(e.deposit.discount)} pay-in-full discount)` : ""}`,
     planName: PLAN_NAMES[e.choice?.plan] || "",
     schedule,
     scheduleNote: notes.join(" "),

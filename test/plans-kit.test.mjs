@@ -88,4 +88,29 @@ t('deposit: $2,250 after the fee, $2,500 when the fee is unpaid', () => {
   assert.equal(r.options[0].payments[0].amount, 2500); assert.equal(r.balance, 14000);
 });
 
+t('pay-in-full discount: only on "full", never more than the balance', () => {
+  const r = P.paymentOptions({ tuition: 16500, start: START, today: '2026-11-01', fullDiscount: 500 });
+  const full = r.options.find((o) => o.key === 'full');
+  assert.equal(full.payments[0].amount, 15750); assert.equal(full.discount, 500); assert.equal(full.fullPrice, 16250);
+  assert.match(full.label, /save \$500/);
+  assert.equal(r.options.find((o) => o.key === 'monthly').payments.reduce((a, p) => a + p.amount, 0), 16250, 'other plans unchanged');
+  assert.equal(P.paymentOptions({ tuition: 2700, start: START, today: '2026-11-01', fullDiscount: 500 }).options.find((o) => o.key === 'full').payments[0].amount, 2450 - 200, 'capped at the balance after the deposit');
+  assert.equal(P.paymentOptions({ tuition: 16500, start: START, today: '2026-11-01' }).options.find((o) => o.key === 'full').discount, undefined);
+});
+
+t('two-instalment discount comes off the final payment; all discounts end 60 days before the start', () => {
+  const r = P.paymentOptions({ tuition: 16500, start: START, today: '2026-11-01', discounts: { full: 500, two: 250 } });
+  const two = r.options.find((o) => o.key === 'two');
+  assert.deepEqual(two.payments.map((p) => p.amount), [2250, 7000, 6750]); assert.equal(two.discount, 250);
+  assert.equal(r.options.find((o) => o.key === 'full').payments[0].amount, 15750);
+  // 75–90 days: half with the deposit, discount off the second payment
+  const mid = P.paymentOptions({ tuition: 16500, start: START, today: '2027-06-15', discounts: { full: 500, two: 250 } });
+  assert.deepEqual(mid.options.find((o) => o.key === 'two').payments.map((p) => p.amount), [9250, 6750]);
+  // 61 days out: full-only, still discounted; 60 days out: none
+  assert.equal(P.paymentOptions({ tuition: 16500, start: START, today: '2027-07-10', discounts: { full: 500 } }).options[0].payments[0].amount, 15750);
+  const late = P.paymentOptions({ tuition: 16500, start: START, today: '2027-07-11', discounts: { full: 500, two: 250 } });
+  assert.equal(late.daysToStart, 60);
+  assert.equal(late.options[0].discount, undefined); assert.equal(late.options[0].payments[0].amount, 16250);
+});
+
 console.log(`plans-kit: ${n} passed`);

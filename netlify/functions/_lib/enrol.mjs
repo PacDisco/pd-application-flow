@@ -71,11 +71,36 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
   const paid = app.paid_at ? Number(app.payment?.base ?? 250) : 0;
   return {
-    tuition, paid, deposit: P.depositFor(paid),
+    tuition, paid, deposit: P.depositFor(paid), discounts: planDiscounts(schema, app),
     start: dates.start, end: dates.end, programRecordId: dates.recordId,
     holdUntil: new Date(now.getTime() + holdDays * DAY).toISOString(), at: now.toISOString(),
   };
 }
+
+/** Program kind for the pay-in-full discount: semester | mini | summer. */
+export function programKind(schema, app) {
+  const t = K.programByName(schema, app.program)?.type || app.program_type || "";
+  if (/mini/i.test(t) || /mini/i.test(app.program || "")) return "mini";
+  if (/summer/i.test(t) || /summer/i.test(app.program || "")) return "summer";
+  return "semester";
+}
+
+/**
+ * Plan discounts for this applicant now (dashboard → Acceptance & deposit):
+ * { full, two } in dollars by program kind. settings.discounts =
+ * { enabled, full: { semester, mini, summer }, two: { … } } (the first
+ * version stored pay-in-full only, as settings.payInFull).
+ */
+export function planDiscounts(schema, app) {
+  const st = schema?.settings || {};
+  const d = st.discounts || (st.payInFull ? { enabled: st.payInFull.enabled, full: st.payInFull } : null);
+  if (!d?.enabled) return { full: 0, two: 0 };
+  const kind = programKind(schema, app);
+  const amt = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : 0; };
+  return { full: amt(d.full?.[kind]), two: amt(d.two?.[kind]) };
+}
+/** Pay-in-full discount alone (kept for callers of the first version). */
+export const payInFullDiscount = (schema, app) => planDiscounts(schema, app).full;
 
 export function acceptLink(token) {
   return `${siteUrl()}/accept?token=${encodeURIComponent(token)}`;
@@ -116,7 +141,7 @@ export function offerView(app, { enrolment = {}, decision = null } = {}, schema,
   const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
   const holdUntil = decision.holdUntil || o.holdUntil;
   const expired = holdUntil && new Date(holdUntil) < now;
-  const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now) });
+  const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now), discounts: o.discounts || { full: o.payInFullDiscount || 0 } });
   const rates = K.surchargeRates(schema);
   return {
     ...base, state: expired ? "expired" : "offer",
@@ -143,7 +168,7 @@ export async function startCheckout(app, { plan, method, agree, token }, schema,
   const rate = view.rates[method];
   const charge = P.todayCharge(option, rate);
   const program = app.program || "Pacific Discovery";
-  const what = plan === "full" ? `Tuition in full — ${program}`
+  const what = plan === "full" ? `Tuition in full — ${program}${option.discount ? ` (after $${option.discount.toLocaleString("en-US")} pay-in-full discount)` : ""}`
     : option.payments[0].amount > view.deposit ? `Deposit + first instalment — ${program}` : `Deposit — ${program}`;
   const ret = acceptLink(token);
   const currency = String(schema.settings?.currency || "usd").toLowerCase();
@@ -189,6 +214,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
   const deposit = {
     amount: choice.charge.base, fee: choice.charge.fee, total: choice.charge.total, method: choice.method,
     reference: session.payment_intent || session.id, sessionId: session.id, status, paidAt: new Date().toISOString(),
+    ...(choice.option?.discount ? { discount: choice.option.discount, discountPlan: choice.plan } : {}),
   };
   const patch = {
     choice: { plan: choice.plan, method: choice.method, rate: choice.rate ?? null, termsVersion: choice.termsVersion, agreedAt: choice.agreedAt },
@@ -216,10 +242,13 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
       if (st && R.isForward(pipe, deal?.properties?.dealstage, st)) props.dealstage = st.id;
       const slot = R.choosePaymentSlot(deal?.properties || {}, deposit.reference);
       if (slot) props[slot] = R.paymentEntry(deposit.amount, deposit.reference, deposit.paidAt);
+      // Plan discount: the deal's amount becomes what they actually owe,
+      // so the portal (and reporting) don't show the discount as still due.
+      if (deposit.discount && enrolment.offer?.tuition) props.amount = String(Math.round((enrolment.offer.tuition - deposit.discount) * 100) / 100);
       if (Object.keys(props).length) await HS.updateDeal(app.hubspot_deal_id, props);
       const plan = PLAN_LABEL[choice.plan];
       const rows = schedule.filter((p) => p.kind !== "deposit").map((p) => `<li>${esc(p.due)} — $${p.amount.toFixed(2)}${p.manual ? " (to pay by this date)" : " (automatic)"}</li>`).join("");
-      await HS.addNote(`<p><strong>Place confirmed</strong> — paid $${deposit.total.toFixed(2)} by ${choice.method === "ach" ? "bank account" : "card"} (${esc(deposit.reference)}). Plan: ${esc(plan)}. Terms v${esc(choice.termsVersion || "?")} agreed ${esc(choice.agreedAt)}.</p>${rows ? `<ul>${rows}</ul>` : ""}`,
+      await HS.addNote(`<p><strong>Place confirmed</strong> — paid $${deposit.total.toFixed(2)} by ${choice.method === "ach" ? "bank account" : "card"} (${esc(deposit.reference)}). Plan: ${esc(plan)}${deposit.discount ? ` with the $${deposit.discount.toLocaleString("en-US")} ${choice.plan === "two" ? "two-instalment (off the final payment)" : "pay-in-full"} discount (deal amount set to $${(enrolment.offer.tuition - deposit.discount).toLocaleString("en-US")})` : ""}. Terms v${esc(choice.termsVersion || "?")} agreed ${esc(choice.agreedAt)}.</p>${rows ? `<ul>${rows}</ul>` : ""}`,
         { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id });
       patch.hubspot = { ok: true, stage: props.dealstage ? st.label : null };
     } catch (err) { log.error?.("[enrol hubspot]", err.message); patch.hubspot = { ok: false, error: String(err.message).slice(0, 300) }; }
