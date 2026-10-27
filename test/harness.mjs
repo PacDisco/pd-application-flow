@@ -119,6 +119,11 @@ export function fakeUpstreams({ pdOptions } = {}) {
       if ((m = /^\/crm\/v4\/objects\/contacts\/(\w+)\/associations\/meetings$/.exec(p))) {
         return J({ results: (crm.meetingAssoc.get(m[1]) || []).map((id) => ({ toObjectId: id })) });
       }
+      if ((m = /^\/crm\/v4\/objects\/deals\/(\d+)\/associations\/contacts$/.exec(p))) {
+        const ids = [...crm.assoc.entries()].filter(([, deals]) => deals.includes(m[1])).map(([cid]) => cid);
+        return J({ results: ids.map((id) => ({ toObjectId: Number(id) })) });
+      }
+      if (p === '/crm/v3/objects/contacts/batch/read') return J({ results: b.inputs.map((i) => crm.contacts.get(String(i.id))).filter(Boolean) });
       if (p === '/crm/v3/objects/meetings/batch/read') return J({ results: b.inputs.map((i) => crm.meetings.get(String(i.id))).filter(Boolean) });
       if (p === '/crm/v3/objects/deals/batch/read') return J({ results: b.inputs.map((i) => crm.deals.get(i.id)).filter(Boolean) });
       if (p === '/crm/v3/objects/notes') { crm.notes.push(b); return J({ id: 'n1' }); }

@@ -112,7 +112,9 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
     // Refund first. Default: refund, unless they were accepted (then the fee
     // is non-refundable under the terms) — admissions can override either way.
     const wantRefund = refund === undefined ? prev?.outcome !== "accepted" : !!refund;
-    if (wantRefund && app.paid_at) {
+    // Only a fee paid by Stripe through pd-apply can be refunded here (an
+    // imported applicant's fee was paid another way).
+    if (wantRefund && app.paid_at && /^pi_/.test(String(app.payment?.reference || ""))) {
       const r = await refundPayment(app.payment?.reference, {
         key: `pd-apply-decline-${app.id}`,
         metadata: { application_id: app.id, source: "pd-apply", reason: "application not accepted" },

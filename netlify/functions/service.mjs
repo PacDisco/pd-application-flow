@@ -13,6 +13,8 @@
 //   POST /api/service/withdraw { id, by, reason }    withdrew after the deposit: cancel future payments, deal → Cancelled
 //   POST /api/service/payment-retry { id, item, by } try a failed payment again on the next run
 //   POST /api/service/payments-pause { id, paused, by }
+//   POST /api/service/hubspot-lookup { email }      a student's HubSpot deals (to add an older applicant)
+//   POST /api/service/import { email, dealId, by }  create the application from that deal (no emails sent)
 //   POST /api/service/deposit-mark-paid { id, amount?, reference, by }  deposit paid another way → family chooses a plan
 //   POST /api/service/payment-mark-paid { id, item, reference, by }  paid outside Stripe (bank transfer)
 //   GET  /api/service/plan?dealId=&email=            the student portal: payment plan for a deal
@@ -25,6 +27,7 @@ import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
 import { decide, extendHold, resendAcceptance } from "./_lib/decisions.mjs";
 import * as PAY from "./_lib/payments.mjs";
+import * as IMP from "./_lib/import.mjs";
 import { dealPaid } from "./_lib/deal-paid.mjs";
 
 export const config = { path: ["/api/service/*"] };
@@ -102,6 +105,14 @@ export default async (req) => {
       const app = await PAY.appForPortal({ dealId: b.dealId, email: b.email });
       if (!app || !PAY.portalPlan(app, { dealTotal: (await dealPaid(app))?.total ?? null })) return json({ error: "No payment plan for this enrolment." }, 404);
       return json({ url: await PAY.portalLink(app) });
+    }
+    if (req.method === "POST" && route === "hubspot-lookup") {
+      const b = await req.json();
+      return json({ ok: true, ...(await IMP.lookup(b.email)) });
+    }
+    if (req.method === "POST" && route === "import") {
+      const b = await req.json();
+      return json({ ok: true, ...(await IMP.importFromDeal({ email: b.email, dealId: b.dealId, by: b.by })) });
     }
     if (req.method === "POST" && route === "deposit-mark-paid") {
       const b = await req.json();
