@@ -441,6 +441,90 @@ await t('student portal: plan by deal for the student or a parent only; a fresh 
   assert.equal(noKey.status, 403);
 });
 
+// ── plan savings: pay off early + "savings end soon" emails ────────────────
+const DISC = { enabled: true, full: { semester: 500 }, two: { semester: 250 } };
+
+await t('savingsNow / discountAction (pure): offer savings until 61 days out; reminders 14 and 3 days before, once each', async () => {
+  const sch = { ...schema, settings: { ...schema.settings, discounts: DISC } };
+  const app = { program: 'South America Gap Semester', paid_at: '2026-10-01', payment: { base: 250 }, status: 'accepted' };
+  const e = { offer: { tuition: 15500, start: '2027-09-09', discounts: { full: 500, two: 250 }, holdUntil: '2027-12-01T00:00:00Z' } };
+  const d = { outcome: 'accepted', at: '2026-10-01T00:00:00Z' };
+  const sv = PAY.savingsNow(app, e, d, sch, at('2027-06-01'));
+  assert.deepEqual(sv, { kind: 'offer', full: 500, two: 250, until: '2027-07-10' });
+  assert.match(PAY.savingsText(sv), /^pay in full and save \$500(\.00)?, or pay in two instalments and save \$250(\.00)?$/);
+  assert.deepEqual(PAY.savingsNow(app, e, d, sch, at('2027-06-26')), { kind: 'offer', full: 500, two: 0, until: '2027-07-10' }, 'under 75 days: pay in full only, still discounted');
+  assert.equal(PAY.savingsNow(app, e, d, sch, at('2027-07-11')), null, 'gone 60 days out');
+  const c = { ...cfg, discountReminders: true };
+  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-06-25'), c).action, 'none', '15 days before');
+  assert.deepEqual(PAY.discountAction(app, e, d, sch, at('2027-06-26'), c).stage, 14);
+  const sent = { ...e, discountReminded: { '2027-07-10|14': '2027-06-26T18:00:00Z' } };
+  assert.equal(PAY.discountAction(app, sent, d, sch, at('2027-06-27'), c).action, 'none');
+  assert.equal(PAY.discountAction(app, sent, d, sch, at('2027-07-07'), c).stage, 3);
+  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-07-11'), c).action, 'none', 'after the last day');
+  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-06-26'), { ...c, discountReminders: false }).action, 'none', 'switched off');
+  // no discounts set → nothing to remind about
+  assert.equal(PAY.savingsNow(app, { ...e, offer: { ...e.offer, discounts: { full: 0, two: 0 } } }, d, schema, at('2027-06-01')), null);
+});
+
+await t('monthly or two instalments: choosing is final — no pay-in-full saving afterwards', async () => {
+  schema.settings.discounts = DISC;
+  const m = await enrolled('nosave1@x.org', 'monthly');
+  const two = await enrolled('nosave2@x.org', 'two');
+  delete schema.settings.discounts;
+  assert.equal((await api(`offer?token=${m.token}`)).body.offer.payOff, null);
+  assert.equal((await api(`offer?token=${two.token}`)).body.offer.payOff, null);
+  const r = await api('pay-item', { token: m.token, index: 'rest', method: 'card' });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  assert.equal(s.metadata.discount, undefined, 'paying early is still allowed, without the saving');
+});
+
+await t('balance later: paying the balance before the discounts end takes the pay-in-full saving off; deal amount reduced', async () => {
+  schema.settings.discounts = DISC;
+  const { id, token, deal } = await enrolled('payoff@x.org', 'later');
+  delete schema.settings.discounts;
+  const o = (await api(`offer?token=${token}`)).body.offer;
+  assert.deepEqual(o.payOff, { amount: 500, rest: 13000, pay: 12500, until: '2027-07-10' });
+  const r = await api('pay-item', { token, index: 'rest', method: 'card' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  assert.equal(s.amount_total, 1250000 + 43750, '$13,000 − $500, + 3.5%');
+  assert.equal(Number(s.metadata.discount), 500);
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await hook('checkout.session.completed', s);
+  await hook('checkout.session.completed', s);
+  const after = await enrolment(id);
+  assert.deepEqual(after.schedule.map((p) => p.status), ['paid', 'paid']);
+  assert.equal(after.schedule[1].amount, 12500);
+  assert.equal(after.schedule[1].payOffDiscount, 500);
+  assert.equal(after.payOff.discount, 500);
+  assert.equal(up.crm.deals.get(deal).properties.amount, '15000');
+  const o2 = (await api(`offer?token=${token}`)).body.offer;
+  assert.equal(o2.rest, 0); assert.equal(o2.payOff, null);
+});
+
+await t('balance later: balance reminder mentions the saving; "savings end" emails 14 and 3 days before, then none', async () => {
+  schema.settings.discounts = DISC;
+  const { token } = await enrolled('payoff2@x.org', 'later');
+  delete schema.settings.discounts;
+  const runs = async (day) => { const before = mails.length; for (let i = 0; i < 4; i++) await run(at(day)); return mails.slice(before); };
+  const rem = (await runs('2027-05-28')).filter((m) => /balance/i.test(m.subject));
+  assert.equal(rem.length, 1);
+  assert.match(rem[0].text, /Pay it by July 10, 2027 and we'll take \$500 off/);
+  const m14 = (await runs('2027-06-26')).filter((m) => /save/i.test(m.subject));
+  assert.equal(m14.length, 1, 'one reminder');
+  assert.match(m14[0].subject, /Last chance to save \$500/);
+  assert.match(m14[0].text, /July 10, 2027/);
+  assert.ok(m14[0].to.includes('payoff2@x.org'));
+  assert.equal((await runs('2027-06-27')).filter((m) => /save/i.test(m.subject)).length, 0);
+  assert.equal((await runs('2027-07-07')).filter((m) => /save/i.test(m.subject)).length, 1, '3 days before');
+  assert.equal((await runs('2027-07-11')).filter((m) => /save/i.test(m.subject)).length, 0, 'over');
+  const { payOffSaving } = await import('../netlify/functions/_lib/enrol.mjs');
+  const e = await enrolment((await pool.query(`SELECT id FROM applications WHERE email = 'payoff2@x.org'`)).rows[0].id);
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-07-10')).amount, 500, 'last day');
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-07-11')), null, 'saving gone after the last day');
+  assert.ok(token);
+});
+
 up.restore();
 await pool.end();
 console.log(`payments: ${n} passed`);

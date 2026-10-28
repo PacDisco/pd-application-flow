@@ -26,6 +26,8 @@ export const MONTHLY_MIN_DAYS = 90;
 export const TWO_MIN_DAYS = 75;
 /** Plan discounts (pay in full / two instalments) end this many days before the start. */
 export const DISCOUNT_END_DAYS = 60;
+/** The last day plan discounts can be taken (YYYY-MM-DD): the day before the 60-day mark. */
+export const discountLastDay = (start) => iso(new Date(day(start).getTime() - (DISCOUNT_END_DAYS + 1) * 864e5));
 
 const DAY = 864e5;
 const cents = (n) => Math.round(Number(n) * 100);

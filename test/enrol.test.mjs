@@ -215,7 +215,7 @@ await t('pay-in-full discount (semester $500): fixed at acceptance, charged on "
   schema.settings.payInFull = { enabled: true, semester: 500, mini: 250, summer: 0 };
   const { id, token, deal } = await acceptedApp('payfull@x.org');
   delete schema.settings.payInFull;
-  assert.match(mails.at(-1).text, /Pay in full and save \$500\./);
+  assert.match(mails.at(-1).text, /Pay in full and save \$500 — these savings are only available until July 10, 2027\./);
   const o = (await offer(token)).body.offer;
   const full = o.options.find((x) => x.key === 'full');
   assert.equal(full.discount, 500); assert.equal(full.payments[0].amount, 15250 - 500);
@@ -238,7 +238,7 @@ await t('two-instalment discount: off the final payment, deal amount reduced, em
   schema.settings.discounts = { enabled: true, full: { semester: 500 }, two: { semester: 250, mini: 100 } };
   const { id, token, deal } = await acceptedApp('twodisc@x.org');
   delete schema.settings.discounts;
-  assert.match(mails.at(-1).text, /Pay in full and save \$500, or pay in two instalments and save \$250\./);
+  assert.match(mails.at(-1).text, /Pay in full and save \$500, or pay in two instalments and save \$250 — these savings are only available until /);
   const o = (await offer(token)).body.offer;
   const two = o.options.find((x) => x.key === 'two');
   assert.equal(two.discount, 250); assert.deepEqual(two.payments.map((p) => p.amount), [2250, 6500, 6250]);

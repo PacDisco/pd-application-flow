@@ -113,6 +113,7 @@ function render() {
       ${main.map((x, i) => `<label class="opt${x.key === 'full' && x.discount ? ' opt--best' : ''}" data-on="${x.key === S.plan}"><input type="radio" name="plan" value="${x.key}"${x.key === S.plan ? ' checked' : ''}>
         <span><span class="t">${esc(x.label.replace(/ — save .*/, ''))}${i === 0 && x.key === 'monthly' ? '<span class="tag">Most popular</span>' : ''}${x.discount ? (x.key === 'full' ? '<span class="tag tag--best">Best value</span>' : `<span class="tag tag--save">Save ${money(x.discount)}</span>`) : ''}</span><span class="d" style="display:block">${esc(describe(x))}</span>${x.key === 'full' && x.discount ? `<span class="save">You save ${money(x.discount)}</span>` : ''}</span></label>`).join('')}
     </div>
+    ${o.discountsUntil ? `<p class="until">These savings are available until <strong>${esc(dateL(o.discountsUntil))}</strong>.${o.options.some((x) => x.key === 'later') ? ' Paying the deposit now and the balance later? Pay the balance by then and you still get the pay-in-full saving.' : ''}</p>` : ''}
     ${quiet ? `<p style="margin:4px 0 0"><button type="button" class="quiet" id="later">${S.plan === 'later' ? '✓ ' : ''}${pre ? `Or pay the balance yourself by ${esc(dateL(quiet.payments[1].due))}` : `Or pay the ${money(o.deposit)} deposit now and the balance by ${esc(dateL(quiet.payments[1].due))}`}</button></p>` : ''}
     ${later.length ? `<details style="margin-top:14px"${S.plan === 'later' ? ' open' : ''}><summary class="small">Payment schedule</summary><table class="sched">
       ${sel.payments.map((p, i) => `<tr><td>${i === 0 ? 'Today' : esc(dateS(p.due))}${p.manual ? ' <span class="small">(you pay by this date)</span>' : ''}</td><td>${money(p.amount)}</td></tr>`).join('')}</table>
@@ -161,26 +162,30 @@ const PAYABLE = ['failed', 'needs_admissions', 'due'];
 
 function renderEnrolled(o) {
   if (!S.payMethod) S.payMethod = o.method === 'ach' ? 'ach' : 'card';
-  const payable = (o.schedule || []).map((p, i) => ({ ...p, i })).filter((p) => PAYABLE.includes(p.status));
+  const po = o.withdrawn ? null : o.payOff;
+  // While the pay-off saving lasts, the balance is paid through "everything remaining" (with the saving).
+  const payable = (o.schedule || []).map((p, i) => ({ ...p, i })).filter((p) => PAYABLE.includes(p.status) && !(po && p.manual));
   const rows = (o.schedule || []).map((p, i) => `<tr><td>${i === 0 ? 'Paid' : esc(dateS(p.due))}${p.manual ? ' <span class="small">(you pay by this date)</span>' : ''}</td>
     <td>${money(p.amount)} <span class="st st--${esc(p.status)}">${esc(STATUS[p.status] || p.status)}</span></td></tr>`).join('');
   const rate = o.rates?.[S.payMethod] || 0;
   const needed = payable.some((p) => !p.manual);
   const payableSum = payable.reduce((a, p) => a + p.amount, 0);
-  const restRow = o.rest > 0 && Math.abs(o.rest - payableSum) > 0.005;
+  const restRow = o.rest > 0 && (po || Math.abs(o.rest - payableSum) > 0.005);
   const withFee = (n) => Math.round((n + Math.round(n * rate * 100) / 100) * 100) / 100;
-  const payBox = !o.withdrawn && (payable.length || restRow) ? `<section class="card"><h2 class="serif">${needed ? 'Payment needed' : payable.length ? 'Pay your balance' : 'Pay early'}</h2>
-    <p class="lead" style="margin-bottom:12px">${needed ? 'A payment didn\'t go through. You can pay it now:' : payable.length ? 'Pay any time before the due date.' : 'Want to pay the rest of your tuition now? Your automatic payments stop once it\'s paid.'}</p>
+  const payBox = !o.withdrawn && (payable.length || restRow) ? `<section class="card${po ? ' card--save' : ''}"><h2 class="serif">${needed ? 'Payment needed' : po ? `Pay the rest now and save ${money(po.amount)}` : payable.length ? 'Pay your balance' : 'Pay early'}</h2>
+    <p class="lead" style="margin-bottom:12px">${needed ? 'A payment didn\'t go through. You can pay it now:' : po ? `Pay your balance by <strong>${esc(dateL(po.until))}</strong> and we'll take <strong>${money(po.amount)}</strong> off — the same saving as paying in full. After that date the saving ends.` : payable.length ? 'Pay any time before the due date.' : 'Want to pay the rest of your tuition now? Your automatic payments stop once it\'s paid.'}</p>
     <div class="methods" role="radiogroup" aria-label="Pay with">
       <label class="opt" data-on="${S.payMethod === 'card'}"><input type="radio" name="pm" value="card"${S.payMethod === 'card' ? ' checked' : ''}><span><span class="t">Card</span><span class="d" style="display:block">${o.rates?.card ? `${pct(o.rates.card)} processing fee` : 'No fee'}</span></span></label>
       <label class="opt" data-on="${S.payMethod === 'ach'}"><input type="radio" name="pm" value="ach"${S.payMethod === 'ach' ? ' checked' : ''}><span><span class="t">US bank account</span><span class="d" style="display:block">${o.rates?.ach ? `${pct(o.rates.ach)} fee` : 'No fee'} · takes a few days to clear</span></span></label>
     </div>
     ${payable.map((p) => { const total = Math.round((p.amount + Math.round(p.amount * rate * 100) / 100) * 100) / 100; return `<div class="pay" style="margin-top:8px"><span>${p.manual ? 'Tuition balance' : `Payment due ${esc(dateL(p.due))}`}: <strong>${money(p.amount)}</strong></span>
       <button class="btn btn--go" type="button" data-pay="${p.i}">Pay ${money(total)} →</button></div>`; }).join('')}
-    ${restRow ? `<div class="pay" style="margin-top:8px"><span>Everything remaining: <strong>${money(o.rest)}</strong></span>
-      <button class="btn ${payable.length ? 'btn--line' : 'btn--go'}" type="button" data-pay="rest">Pay ${money(withFee(o.rest))} →</button></div>` : ''}
+    ${restRow ? (po ? `<div class="pay" style="margin-top:8px"><span>Everything remaining: <s>${money(po.rest)}</s> <strong>${money(po.pay)}</strong> <span class="tag tag--save">Save ${money(po.amount)}</span></span>
+      <button class="btn btn--go" type="button" data-pay="rest">Pay ${money(withFee(po.pay))} →</button></div>` : `<div class="pay" style="margin-top:8px"><span>Everything remaining: <strong>${money(o.rest)}</strong></span>
+      <button class="btn ${payable.length ? 'btn--line' : 'btn--go'}" type="button" data-pay="rest">Pay ${money(withFee(o.rest))} →</button></div>`) : ''}
   </section>` : '';
-  $('#view').innerHTML = `${payable.length ? payBox : ''}<section class="card">
+  const top = payable.length || po;
+  $('#view').innerHTML = `${top ? payBox : ''}<section class="card">
     <div class="tick" aria-hidden="true">✓</div>
     <h1 class="serif">${o.withdrawn ? 'Your place has been cancelled' : o.processing ? 'Payment received — clearing' : 'Your place is confirmed!'}</h1>
     <p class="lead">${o.withdrawn
@@ -192,7 +197,7 @@ function renderEnrolled(o) {
     <table class="sched">${rows}</table>
     ${o.canUpdateMethod ? `<p style="margin:14px 0 0"><button class="btn btn--line" type="button" id="upd">Change card or bank account</button> <span class="small">Automatic payments use the ${o.method === 'ach' ? 'bank account' : 'card'} you paid with; we email you 3 days before each one.</span></p>` : ''}
     <p class="small" style="margin-top:14px">Your student portal has your pre-departure information, forms and payments: <a href="https://portal.pacificdiscovery.org/login.html">portal.pacificdiscovery.org</a> — sign in with ${esc(o.email)}.</p>
-  </section>${payable.length ? '' : payBox}${advisorCard(o)}`;
+  </section>${top ? '' : payBox}${advisorCard(o)}`;
   document.querySelectorAll('input[name=pm]').forEach((el) => el.addEventListener('change', () => { S.payMethod = el.value; renderEnrolled(o); }));
   document.querySelectorAll('[data-pay]').forEach((b) => b.addEventListener('click', () => go(b, 'pay-item', { index: b.dataset.pay === 'rest' ? 'rest' : Number(b.dataset.pay), method: S.payMethod })));
   $('#upd')?.addEventListener('click', (e) => go(e.currentTarget, 'update-method', {}));

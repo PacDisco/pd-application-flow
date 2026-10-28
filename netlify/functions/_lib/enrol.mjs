@@ -100,6 +100,42 @@ export function planDiscounts(schema, app) {
   const amt = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : 0; };
   return { full: amt(d.full?.[kind]), two: amt(d.two?.[kind]) };
 }
+/**
+ * The discounts this family can have: what they were offered at acceptance,
+ * or today's settings if those are better (a discount added after they were
+ * accepted still applies; lowering one never takes back what they were told).
+ */
+export function familyDiscounts(app, enrolment, schema) {
+  const o = enrolment?.offer || {};
+  const fixed = o.discounts || { full: o.payInFullDiscount || 0, two: 0 };
+  const live = planDiscounts(schema, app);
+  return { full: Math.max(Number(fixed.full) || 0, live.full), two: Math.max(Number(fixed.two) || 0, live.two) };
+}
+
+const OPEN_ITEMS = ["scheduled", "failed", "needs_admissions", "due"];
+/** Left to pay after the deposit (open schedule items), in dollars. */
+export const restOf = (enrolment) => Math.round((enrolment?.schedule || []).filter((p, i) => i > 0 && OPEN_ITEMS.includes(p.status)).reduce((a, p) => a + Math.round(p.amount * 100), 0)) / 100;
+
+/**
+ * A family on "deposit now, balance later" who pays the balance before the
+ * discounts end gets the pay-in-full saving. Choosing monthly or two
+ * instalments is final: no pay-in-full saving after that.
+ * → { amount, rest, pay, until } or null. Pure apart from `now`.
+ */
+export function payOffSaving(app, enrolment, schema, now = new Date()) {
+  const e = enrolment || {};
+  if (e.deposit?.status !== "paid" || e.withdrawn || e.payOff) return null;
+  if (e.choice?.plan !== "later" || !e.offer?.start) return null;
+  const until = P.discountLastDay(e.offer.start);
+  if (P.iso(now) > until) return null;
+  const rest = restOf(e);
+  if (rest <= 0) return null;
+  const already = e.deposit?.discountPlan === "two" ? Number(e.deposit.discount) || 0 : 0;
+  const cents = Math.min(Math.round(rest * 100), Math.max(0, Math.round((familyDiscounts(app, e, schema).full - already) * 100)));
+  if (cents <= 0) return null;
+  return { amount: cents / 100, rest, pay: (Math.round(rest * 100) - cents) / 100, until };
+}
+
 /** Pay-in-full discount alone (kept for callers of the first version). */
 export const payInFullDiscount = (schema, app) => planDiscounts(schema, app).full;
 
@@ -137,9 +173,9 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
       rates: { ...K.surchargeRates(schema), ...(enrolment.choice?.rate != null ? { [enrolment.choice.method === "ach" ? "ach" : "card"]: Number(enrolment.choice.rate) } : {}) },
       withdrawn: !!enrolment.withdrawn,
       // pay off everything left in one go
-      rest: enrolment.deposit.status === "paid" && !enrolment.withdrawn
-        ? Math.round((enrolment.schedule || []).filter((p, i) => i > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status)).reduce((a, p) => a + p.amount * 100, 0)) / 100
-        : 0,
+      rest: enrolment.deposit.status === "paid" && !enrolment.withdrawn ? restOf(enrolment) : 0,
+      // paying it all now, before the discounts end, earns the pay-in-full saving
+      payOff: payOffSaving(app, enrolment, schema, now),
       // can change the saved card / bank account while automatic payments remain
       canUpdateMethod: !enrolment.withdrawn && (enrolment.schedule || []).some((p) => !p.manual && ["scheduled", "failed", "needs_admissions"].includes(p.status)),
     };
@@ -157,14 +193,14 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
   // Discounts: what they were offered at acceptance, or today's settings if
   // those are better (a discount added after they were accepted still applies;
   // lowering one never takes back what they were told).
-  const fixed = o.discounts || { full: o.payInFullDiscount || 0, two: 0 };
-  const live = planDiscounts(schema, app);
-  const discounts = { full: Math.max(fixed.full || 0, live.full), two: Math.max(fixed.two || 0, live.two) };
+  const discounts = familyDiscounts(app, enrolment, schema);
   const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now), discounts });
   const rates = K.surchargeRates(schema);
+  const saving = opts.options.some((x) => x.discount);
   return {
     ...base, state: expired ? "expired" : "offer",
     tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, end: o.end, holdUntil,
+    ...(saving ? { discountsUntil: P.discountLastDay(o.start) } : {}),
     ...(prepaid ? { prepaid } : {}),
     balance: opts.balance, daysToStart: opts.daysToStart, options: opts.options, rates,
     terms: terms ? { version: terms.version, title: terms.title, url: `${siteUrl()}/terms?v=${terms.version}` } : null,
@@ -319,7 +355,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
   if (mailOn() && TK.emailTemplate(schema, "enrolled").enabled) {
     try {
       const terms = await publishedTermsOrNull(choice.termsVersion ? { version: choice.termsVersion } : {});
-      const msg = await sendEnrolled(app, schema, { enrolment: now, terms });
+      const msg = await sendEnrolled(app, schema, { enrolment: now, terms, payOff: payOffSaving(app, now, schema) });
       emails.enrolled = { to: msg.to, at: new Date().toISOString(), hubspot: await logFamilyEmail(app, msg) };
     } catch (err) { log.error?.("[enrol email]", err.message); emails.enrolled = { error: String(err.message).slice(0, 300) }; }
   }

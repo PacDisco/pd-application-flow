@@ -31,7 +31,7 @@ import * as TK from "../../../public/terms-kit.mjs";
 import { chargeSaved, expireCheckout, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
 import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
-import { acceptLink, paidSoFar } from "./enrol.mjs";
+import { acceptLink, paidSoFar, payOffSaving, familyDiscounts } from "./enrol.mjs";
 import { dealPaid } from "./deal-paid.mjs";
 
 const DAY = 864e5;
@@ -47,6 +47,8 @@ export const MAX_ATTEMPTS = 3;
 export const BALANCE_REMIND_DAYS = [14, 3];
 /** Deposit reminders when this many days are left on the hold. */
 export const DEPOSIT_REMIND_LEFT = [5, 2, 1];
+/** Plan savings: reminders this many days before the last day they can be taken. */
+export const DISCOUNT_REMIND_DAYS = [14, 3];
 /** Per run, so a mistake can't run away. */
 export const MAX_ACTIONS_PER_RUN = 40;
 const MIN_GAP_MS = 20 * 3600e3;
@@ -56,7 +58,7 @@ export const PAYABLE = ["failed", "needs_admissions", "due"];
 
 export function paymentSettings(schema) {
   const p = schema?.settings?.payments || {};
-  return { autoCharge: p.autoCharge !== false, depositReminders: p.depositReminders !== false, tz: process.env.INTERVIEW_TZ || "America/Denver" };
+  return { autoCharge: p.autoCharge !== false, depositReminders: p.depositReminders !== false, discountReminders: p.discountReminders !== false, tz: process.env.INTERVIEW_TZ || "America/Denver" };
 }
 
 /** Calendar day (YYYY-MM-DD) in admissions' time zone. */
@@ -126,6 +128,54 @@ export function depositAction(e, decision, now, cfg) {
   const last = Math.max(0, ...Object.values(e.depositReminded || {}).map((t) => Date.parse(t) || 0));
   if (now - last < MIN_GAP_MS) return { action: "none", reason: "sent recently" };
   return { action: "remind", stage, holdUntil };
+}
+
+/**
+ * The savings they can still take, for the emails. Pure (tested).
+ *   offer   → { kind: "offer", full, two, until }   (deposit not paid / choosing a plan)
+ *   payOff  → { kind: "payOff", amount, rest, pay, until }  (on a plan)
+ */
+export function savingsNow(app, e, decision, schema, now = new Date()) {
+  if (!e?.offer?.start || e.withdrawn || decision?.outcome !== "accepted" || app?.status === "withdrawn") return null;
+  if (["paid", "processing"].includes(e.deposit?.status)) {
+    const po = e.deposit.status === "paid" ? payOffSaving(app, e, schema, now) : null;
+    return po ? { kind: "payOff", ...po } : null;
+  }
+  const holdUntil = decision.holdUntil || e.offer.holdUntil;
+  if (!e.prepaid && holdUntil && new Date(holdUntil) <= now) return null;
+  const paid = paidSoFar(app, e);
+  const o = P.paymentOptions({ tuition: e.offer.tuition, paid, deposit: P.depositFor(paid), start: e.offer.start, today: P.iso(now), discounts: familyDiscounts(app, e, schema) });
+  const full = o.options.find((x) => x.key === "full")?.discount || 0;
+  const two = o.options.find((x) => x.key === "two")?.discount || 0;
+  return full || two ? { kind: "offer", full, two, until: P.discountLastDay(e.offer.start) } : null;
+}
+
+/** "Your savings end soon" — 14 and 3 days before the last day. Pure apart from `now` (tested). */
+export function discountAction(app, e, decision, schema, now, cfg) {
+  if (!cfg.discountReminders) return { action: "none" };
+  if (decision?.at && now - new Date(decision.at) < DAY) return { action: "none", reason: "just accepted" };
+  const sv = savingsNow(app, e, decision, schema, now);
+  if (!sv) return { action: "none" };
+  const today = localDay(now, cfg.tz);
+  const left = Math.round((P.day(sv.until) - P.day(today)) / DAY);
+  if (left < 0) return { action: "none" };
+  const stage = [...DISCOUNT_REMIND_DAYS].sort((a, b) => a - b).find((d) => left <= d);
+  if (stage == null) return { action: "none" };
+  const sent = Object.keys(e.discountReminded || {}).filter((k) => k.startsWith(`${sv.until}|`));
+  if (sent.some((k) => Number(k.split("|")[1]) <= stage)) return { action: "none" };
+  const last = Math.max(0, ...Object.values(e.depositReminded || {}).map((t) => Date.parse(t) || 0));
+  if (now - last < MIN_GAP_MS) return { action: "none", reason: "sent recently" };
+  return { action: "remind", stage, savings: sv };
+}
+
+/** "Pay in full and save $500, or in two instalments and save $250" (offer savings, for the emails). */
+export function savingsText(sv) {
+  if (!sv) return "";
+  if (sv.kind === "payOff") return `pay the remaining ${usd(sv.rest)} and save ${usd(sv.amount)}`;
+  const parts = [];
+  if (sv.full) parts.push(`pay in full and save ${usd(sv.full)}`);
+  if (sv.two) parts.push(`pay in two instalments and save ${usd(sv.two)}`);
+  return parts.join(", or ");
 }
 
 // ── atomic updates ─────────────────────────────────────────────────────────
@@ -346,7 +396,9 @@ async function balanceReminder(app, e, idx, stage, schema, now, log) {
   const reminded = [...new Set([...(item.reminded || []), ...BALANCE_REMIND_DAYS.filter((d) => d >= stage)])];
   if (!(await updateItem(app.id, idx, ["due"], { reminded, remindedAt: now.toISOString() }))) return { skipped: "taken" };
   try {
-    const email = await familyEmail(app, schema, "balanceReminder", { amount: usd(item.amount), date: longDate(item.due) }, { log });
+    const po = payOffSaving(app, e, schema, now);
+    const savingLine = po ? `Pay it by ${longDate(po.until)} and we'll take ${usd(po.amount)} off — you'd pay ${usd(po.pay)}, the same saving as paying in full.` : "";
+    const email = await familyEmail(app, schema, "balanceReminder", { amount: usd(item.amount), date: longDate(item.due), savingLine }, { log });
     if (!email.skipped) await updateItem(app.id, idx, ["due"], { reminderEmail: email });
     return { reminded: stage };
   } catch (err) {
@@ -372,11 +424,31 @@ async function depositReminder(app, e, decision, act, schema, now, log) {
   if (!(await claimKey(app.id, "depositReminded", key, now.toISOString()))) return { skipped: "taken" };
   try {
     const hold = new Date(act.holdUntil).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
-    await familyEmail(app, schema, "depositReminder", { holdUntil: hold, deposit: usd(P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0)) }, { log });
+    const sv = savingsNow(app, e, decision, schema, now);
+    const savingsLine = sv ? `${savingsText(sv).replace(/^./, (c) => c.toUpperCase())} — these savings are only available until ${longDate(sv.until)}.` : "";
+    await familyEmail(app, schema, "depositReminder", { holdUntil: hold, deposit: usd(P.depositFor(app.paid_at ? Number(app.payment?.base ?? 250) : 0)), savingsLine }, { log });
     return { depositReminder: act.stage };
   } catch (err) {
     await db().query(`UPDATE applications SET enrolment = enrolment #- $2::text[] WHERE id = $1`, [app.id, `{depositReminded,${key}}`]);
     log.error?.("[payments deposit reminder]", err.message);
+    return { error: err.message };
+  }
+}
+
+async function discountReminder(app, e, act, schema, now, log) {
+  const sv = act.savings;
+  const key = `${sv.until}|${act.stage}`;
+  if (!(await claimKey(app.id, "discountReminded", key, now.toISOString()))) return { skipped: "taken" };
+  try {
+    const vars = sv.kind === "payOff"
+      ? { saving: usd(sv.amount), rest: usd(sv.rest), payNow: usd(sv.pay), until: longDate(sv.until) }
+      : { savings: savingsText(sv), until: longDate(sv.until) };
+    const email = await familyEmail(app, schema, sv.kind === "payOff" ? "payOffEnding" : "savingsEnding", vars, { log });
+    if (!email.skipped) await note(app, `<p><strong>Savings reminder sent</strong> — ${esc(savingsText(sv))}, until ${esc(sv.until)}.</p>`, log);
+    return { discountReminder: act.stage, kind: sv.kind };
+  } catch (err) {
+    await db().query(`UPDATE applications SET enrolment = enrolment #- $2::text[] WHERE id = $1`, [app.id, `{discountReminded,${key}}`]);
+    log.error?.("[payments discount reminder]", err.message);
     return { error: err.message };
   }
 }
@@ -419,10 +491,15 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
         const act = depositAction(e, app.decision, now, cfg);
         if (act.action === "remind") out.actions.push({ id: app.id, ...(await depositReminder(app, e, app.decision, act, schema, now, log)) });
         if (act.action === "expired") out.actions.push({ id: app.id, ...(await holdExpired(app, e, act, now, log)) });
+        if (act.action === "none") {
+          const da = discountAction(app, e, app.decision, schema, now, cfg);
+          if (da.action === "remind") out.actions.push({ id: app.id, ...(await discountReminder(app, e, da, schema, now, log)) });
+        }
         continue;
       }
       if (e.deposit?.status !== "paid") continue;
       // One thing per application per run, in schedule order.
+      let acted = false;
       for (let i = 0; i < (e.schedule || []).length; i++) {
         const act = itemAction(e.schedule[i], e, now, cfg);
         if (act.action === "none") continue;
@@ -432,7 +509,12 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
         else if (act.action === "remind") r = await balanceReminder(app, e, i, act.stage, schema, now, log);
         else if (act.action === "overdue") r = await balanceOverdue(app, e, i, schema, now, log);
         out.actions.push({ id: app.id, item: i, action: act.action, ...r });
+        acted = true;
         break;
+      }
+      if (!acted) {
+        const da = discountAction(app, e, app.decision, schema, now, cfg);
+        if (da.action === "remind") out.actions.push({ id: app.id, ...(await discountReminder(app, e, da, schema, now, log)) });
       }
     } catch (err) {
       log.error?.("[payments run]", app.id, err.message);
@@ -510,7 +592,11 @@ async function startRestCheckout(app, e, { method, token }, schema, now) {
   const items = openRest(e);
   if (!items.length) throw bad("There's nothing left to pay.", 409);
   await closeOpenCheckouts(items, now);
-  const amount = Math.round(items.reduce((a, p) => a + p.amount * 100, 0)) / 100;
+  const rest = Math.round(items.reduce((a, p) => a + p.amount * 100, 0)) / 100;
+  // Paying it all off before the discounts end earns the pay-in-full saving.
+  const po = payOffSaving(app, e, schema, now);
+  const discount = po && Math.abs(po.rest - rest) < 0.005 ? po.amount : 0;
+  const amount = Math.round((rest - discount) * 100) / 100;
   const rate = rateFor(e, schema, method);
   const fee = P.surcharge(amount, rate);
   const payingUntil = new Date(now.getTime() + 3600e3).toISOString();
@@ -521,18 +607,31 @@ async function startRestCheckout(app, e, { method, token }, schema, now) {
   const ret = acceptLink(token);
   const session = await createDepositCheckout({
     app, currency: String(schema?.settings?.currency || "usd").toLowerCase(), method,
-    lines: [[`Remaining tuition — ${program}`, amount], [`${method === "ach" ? "Bank payment" : "Card processing"} fee (${(rate * 100).toFixed(1).replace(/\.0$/, "")}%)`, fee]],
+    lines: [[`Remaining tuition — ${program}${discount ? ` (${usd(rest)} less your ${usd(discount)} pay-in-full saving)` : ""}`, amount], [`${method === "ach" ? "Bank payment" : "Card processing"} fee (${(rate * 100).toFixed(1).replace(/\.0$/, "")}%)`, fee]],
     save: false,
     successUrl: `${ret}&paid=1&session_id={CHECKOUT_SESSION_ID}`,
     cancelUrl: `${ret}&cancelled=1`,
     description: `Remaining tuition — ${program} — ${app.first_name || ""} ${app.last_name || ""}`.trim(),
-    metadata: { payment_kind: "item", items: items.map((p) => p.i).join(","), method, base_amount: amount, processing_fee: fee, ...(app.hubspot_deal_id ? { deal_id: app.hubspot_deal_id } : {}) },
+    metadata: { payment_kind: "item", items: items.map((p) => p.i).join(","), method, base_amount: amount, processing_fee: fee, ...(discount ? { discount } : {}), ...(app.hubspot_deal_id ? { deal_id: app.hubspot_deal_id } : {}) },
     expiresAt: Math.floor(now.getTime() / 1000) + 3600,
   });
   for (const p of items) await updateItem(app.id, p.i, ["scheduled", "failed", "needs_admissions", "due"], { checkoutSession: session.id });
   return { url: session.url };
 }
 const openRest = (e) => (e.schedule || []).map((p, idx) => ({ ...p, i: idx })).filter((p) => p.i > 0 && ["scheduled", "failed", "needs_admissions", "due"].includes(p.status));
+
+/** Take the pay-off saving off the items being paid, last first (once per item). */
+async function applyPayOffDiscount(appId, e, idxs, discount, from) {
+  let left = Math.round(discount * 100);
+  for (const i of [...idxs].sort((a, b) => b - a)) {
+    const p = e.schedule[i];
+    if (p.payOffDiscount != null) { left -= Math.round(p.payOffDiscount * 100); continue; }
+    if (left <= 0) break;
+    const cut = Math.min(left, Math.round(p.amount * 100));
+    await updateItem(appId, i, from, { amount: (Math.round(p.amount * 100) - cut) / 100, fullAmount: p.amount, payOffDiscount: cut / 100 });
+    left -= cut;
+  }
+}
 
 /** Several items paid by one checkout: each marked paid, one HubSpot entry, one receipt. */
 async function recordRest(session, schema, idxs, status, log) {
@@ -542,21 +641,33 @@ async function recordRest(session, schema, idxs, status, log) {
   const mine = idxs.filter((i) => e.schedule?.[i]?.checkoutSession === session.id);
   if (!mine.length) return { ignored: true };
   const OPENISH = ["scheduled", "failed", "needs_admissions", "due"];
+  const discount = Number(m.discount) || 0;
+  if (discount) await applyPayOffDiscount(appId, e, mine, discount, [...OPENISH, "processing"]);
   if (status === "processing") {
     for (const i of mine) await updateItem(appId, i, OPENISH, { status: "processing", paymentIntent: session.payment_intent, method: m.method });
     return { processing: true };
   }
   const reference = session.payment_intent || session.id;
   const total = (session.amount_total || 0) / 100;
+  const { enrolment: e2 } = discount ? await readEnrolment(appId) : { enrolment: e };
   let last = null;
   for (const i of mine) {
-    const r = await itemPaid(appId, i, { reference, amount: e.schedule[i].amount, fee: 0, total: e.schedule[i].amount, method: m.method }, schema, { from: [...OPENISH, "processing"], log, quiet: true });
+    const r = await itemPaid(appId, i, { reference, amount: e2.schedule[i].amount, fee: 0, total: e2.schedule[i].amount, method: m.method }, schema, { from: [...OPENISH, "processing"], log, quiet: true });
     if (r) last = r;
   }
   if (!last) return { ignored: true };
   const app = await A.byId(appId);
   await hubspotPayment(app, Number(m.base_amount), reference, new Date().toISOString(), log);
-  await note(app, `<p><strong>Remaining tuition paid in full</strong> — ${usd(total)} by ${methodName(m.method)} (${esc(reference)}), covering ${mine.length} payment${mine.length === 1 ? "" : "s"}.</p>`, log);
+  if (discount) {
+    await patchEnrolment(appId, { payOff: { discount, reference, at: new Date().toISOString() } });
+    // The deal's amount becomes what they actually paid overall.
+    const tuition = Number(e2.offer?.tuition) || 0;
+    if (hubspotOn() && app.hubspot_deal_id && tuition) {
+      try { await HS.updateDeal(app.hubspot_deal_id, { amount: String(Math.round((tuition - (Number(e2.deposit?.discount) || 0) - discount) * 100) / 100) }); }
+      catch (err) { log.error?.("[payments payoff deal]", err.message); }
+    }
+  }
+  await note(app, `<p><strong>Remaining tuition paid in full</strong> — ${usd(total)} by ${methodName(m.method)} (${esc(reference)}), covering ${mine.length} payment${mine.length === 1 ? "" : "s"}.${discount ? ` Includes the ${usd(discount)} pay-in-full saving for paying off early (deal amount reduced).` : ""}</p>`, log);
   try { await familyEmail(app, schema, "paymentReceived", { amount: usd(total), balanceLine: balanceLine(last.schedule) }, { log }); }
   catch (err) { log.error?.("[payments rest receipt]", err.message); }
   return { paid: mine.length };
@@ -592,7 +703,8 @@ export async function itemCheckoutFailed(session, schema, { log = console } = {}
       const p = e.schedule?.[i];
       if (p?.checkoutSession !== session.id) continue;
       // back to how it was: automatic ones are tried again on the next run
-      if (await updateItem(appId, i, ["processing"], { status: p.manual ? "due" : "failed", nextAttemptAt: new Date().toISOString(), payingUntil: null, lastError: { reason: "bank_payment_failed", at: new Date().toISOString() } })) n++;
+      const undo = p.payOffDiscount != null ? { amount: p.fullAmount, fullAmount: null, payOffDiscount: null } : {};
+      if (await updateItem(appId, i, ["processing"], { status: p.manual ? "due" : "failed", nextAttemptAt: new Date().toISOString(), payingUntil: null, lastError: { reason: "bank_payment_failed", at: new Date().toISOString() }, ...undo })) n++;
     }
     if (n) await note(await A.byId(appId), "<p><strong>Bank payment failed</strong> for the remaining tuition. Automatic payments carry on as scheduled.</p>", log);
     return { failed: n };
@@ -765,7 +877,7 @@ export async function appForPortal({ dealId, email }) {
 }
 
 /** What the student portal shows about the payment plan. Pure (tested). */
-export function portalPlan(app, { dealTotal = null } = {}) {
+export function portalPlan(app, { dealTotal = null, schema = null, now = new Date() } = {}) {
   const e = app?.enrolment || {};
   const d = app?.decision || null;
   // Accepted, deposit not paid yet: the portal sends them to the acceptance
@@ -798,6 +910,7 @@ export function portalPlan(app, { dealTotal = null } = {}) {
     automatic: open.some((p) => !p.manual),
     paused: !!e.paused,
     withdrawn: !!e.withdrawn,
+    payOff: schema ? payOffSaving(app, e, schema, now) : null,
   };
 }
 

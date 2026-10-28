@@ -374,7 +374,7 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     const saves = [];
     if (keys.length > 1 && fullOpt?.discount) saves.push(`pay in full and save ${usd(fullOpt.discount)}`);
     if (twoOpt?.discount) saves.push(`pay in two instalments and save ${usd(twoOpt.discount)}`);
-    if (saves.length) howToPay += ` ${saves.join(", or ").replace(/^./, (c) => c.toUpperCase())}.`;
+    if (saves.length) howToPay += ` ${saves.join(", or ").replace(/^./, (c) => c.toUpperCase())} — these savings are only available until ${shortDate(P.discountLastDay(offer.start))}.`;
   }
   const vars = {
     firstName: app.answers?.preferredName || app.first_name || "there",
@@ -407,7 +407,7 @@ export async function sendAccepted(app, schema, opts) {
 export const PLAN_NAMES = { monthly: "Monthly payments", two: "Two instalments", full: "Paid in full", later: "Deposit now, balance later" };
 
 /** "Your place is confirmed" — plan, schedule, portal. Pure (tested). */
-export function enrolledContent(app, schema, { enrolment, terms = null } = {}) {
+export function enrolledContent(app, schema, { enrolment, terms = null, payOff = null } = {}) {
   const tpl = TK.emailTemplate(schema, "enrolled");
   const e = enrolment || {};
   const method = e.choice?.method === "ach" ? "bank account" : "card";
@@ -422,6 +422,7 @@ export function enrolledContent(app, schema, { enrolment, terms = null } = {}) {
   const feeNote = rate > 0 ? ` A ${(rate * 100).toFixed(1).replace(/\.0$/, "")}% processing fee is added to each ${method} payment.` : "";
   if (auto.length) notes.push(`We'll charge ${auto.length === 1 ? "this" : "these"} automatically to the ${method} you used today and email you 3 days before each payment.${feeNote}`);
   if (e.deposit?.discount && e.choice?.plan === "two") notes.push(`Your ${usd(e.deposit.discount)} two-instalment discount has been taken off your final payment.`);
+  if (payOff?.amount) notes.push(`Pay your balance by ${shortDate(payOff.until)} and we'll take ${usd(payOff.amount)} off — the same saving as paying in full. You can pay any time from the student portal or your confirmation page.`);
   if (manual.length) notes.push(`Please pay the remaining ${usd(manual[0].amount)} by ${shortDate(manual[0].due)} — you can pay any time before then from the student portal.`);
   const vars = {
     firstName: app.answers?.preferredName || app.first_name || "there",
