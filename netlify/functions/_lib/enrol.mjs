@@ -25,7 +25,7 @@ import * as K from "../../../public/form-kit.mjs";
 import * as P from "../../../public/plans-kit.mjs";
 import * as TK from "../../../public/terms-kit.mjs";
 import { createDepositCheckout, createSetupCheckout, getCheckoutSession, getPaymentIntent, getSetupIntent } from "./stripe.mjs";
-import { mailOn, alertOn, sendEnrolled, sendDepositAlert } from "./notify.mjs";
+import { mailOn, alertOn, sendEnrolled, sendDepositAlert, sendFamily, sendAdmissionsAlert, formatUsd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
 import { dealPaid } from "./deal-paid.mjs";
@@ -126,7 +126,10 @@ export function payOffSaving(app, enrolment, schema, now = new Date()) {
   const e = enrolment || {};
   if (e.deposit?.status !== "paid" || e.withdrawn || e.payOff) return null;
   if (e.choice?.plan !== "later" || !e.offer?.start) return null;
-  const until = P.discountLastDay(e.offer.start);
+  // The balance is due before the discounts end (90 vs 60 days out), so its due date is the deadline.
+  const due = (e.schedule || []).find((p, i) => i > 0 && p.manual && OPEN_ITEMS.includes(p.status))?.due;
+  const last = P.discountLastDay(e.offer.start);
+  const until = due && due < last ? due : last;
   if (P.iso(now) > until) return null;
   const rest = restOf(e);
   if (rest <= 0) return null;
@@ -147,6 +150,16 @@ export function paidSoFar(app, enrolment = {}, dealTotal = null) {
   const fee = app?.paid_at ? Number(app.payment?.base ?? 250) : 0;
   return Math.max(fee, Number(enrolment?.prepaid?.total) || 0, Number(dealTotal) || 0);
 }
+
+/** Lives outside the US (home country on the application) → bank transfer is offered up front. */
+export function isInternational(app) {
+  const a = app?.answers || {};
+  const c = String(a.homeCountry || a.homeAddress?.country || "").trim();
+  return !!c && !/^(united states( of america)?|usa?|u\.s\.a?\.?)$/i.test(c);
+}
+
+/** What the family writes as the transfer reference, so it can be matched. */
+export const wireReference = (app) => `${app.first_name || ""} ${app.last_name || ""}`.trim().replace(/\s+/g, " ").slice(0, 40) + " - Pacific Discovery";
 
 export function acceptLink(token) {
   return `${siteUrl()}/accept?token=${encodeURIComponent(token)}`;
@@ -176,6 +189,9 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
       rest: enrolment.deposit.status === "paid" && !enrolment.withdrawn ? restOf(enrolment) : 0,
       // paying it all now, before the discounts end, earns the pay-in-full saving
       payOff: payOffSaving(app, enrolment, schema, now),
+      // paid the deposit by bank transfer: the details again, for the balance
+      wire: enrolment.wire && TK.wireDetails(schema) && (enrolment.schedule || []).some((p, i) => i > 0 && p.manual && p.status === "due")
+        ? { ...TK.wireDetails(schema), reference: enrolment.wire.reference || wireReference(app) } : null,
       // can change the saved card / bank account while automatic payments remain
       canUpdateMethod: !enrolment.withdrawn && (enrolment.schedule || []).some((p) => !p.manual && ["scheduled", "failed", "needs_admissions"].includes(p.status)),
     };
@@ -201,7 +217,14 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
     ...base, state: expired ? "expired" : "offer",
     tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, end: o.end, holdUntil,
     ...(saving ? { discountsUntil: P.discountLastDay(o.start) } : {}),
+    // Bank transfer: offered up front to families outside the US, as a link otherwise.
+    // (Not once the deposit is in: then they only choose a plan.)
+    wire: !prepaid && TK.wireDetails(schema)
+      ? { ...TK.wireDetails(schema), reference: wireReference(app), international: isInternational(app), requested: enrolment.wire ? { plan: enrolment.wire.plan, amount: enrolment.wire.amount, at: enrolment.wire.at } : null }
+      : null,
     ...(prepaid ? { prepaid } : {}),
+    // the plan they picked when they said they'd pay by bank transfer (preselected)
+    ...(enrolment.wire?.plan ? { wirePlan: enrolment.wire.plan } : {}),
     balance: opts.balance, daysToStart: opts.daysToStart, options: opts.options, rates,
     terms: terms ? { version: terms.version, title: terms.title, url: `${siteUrl()}/terms?v=${terms.version}` } : null,
   };
@@ -383,4 +406,58 @@ export async function depositFailed(session, schema, { log = console } = {}) {
     try { await HS.addNote(`<p><strong>Deposit bank payment failed</strong> (${esc(enrolment.deposit.reference)}). The family can pay again from their acceptance link.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); }
     catch (err) { log.error?.("[enrol failed note]", err.message); }
   }
+}
+
+
+/**
+ * The family will pay by bank transfer: record the plan they chose and that
+ * they agreed to the terms, email them the details, tell admissions. Admissions
+ * marks the deposit paid when it arrives (dashboard → Mark deposit paid).
+ */
+export async function startWire(app, { plan, agree, token }, schema, now = new Date(), { log = console } = {}) {
+  const { enrolment, decision } = await readEnrolment(app.id);
+  const terms = await publishedTermsOrNull();
+  const dealTotal = (await dealPaid(app, { fresh: true }))?.total ?? null;
+  const view = offerView(app, { enrolment, decision, dealTotal }, schema, terms, now);
+  if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
+  if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
+  if (view.state !== "offer" || !view.wire) throw bad("Bank transfer isn't available for this offer.", 409);
+  if (!agree) throw bad("Please agree to the Program Terms & Conditions to continue.");
+  const option = view.options.find((o) => o.key === plan);
+  if (!option) throw bad("That payment option isn't available.");
+  const amount = option.payments[0].amount;
+  if (!(amount > 0)) throw bad("There's nothing to pay today.", 409);
+  const prev = enrolment.wire;
+  const wire = { plan, amount, reference: view.wire.reference, termsVersion: terms?.version || null, agreedAt: now.toISOString(), at: now.toISOString() };
+  await patchEnrolment(app.id, { wire });
+  // Asked again within a few minutes with the same choice (double click): no second email.
+  if (prev && prev.plan === plan && prev.amount === amount && now - new Date(prev.at) < 10 * 60e3) return { ok: true, wire, repeat: true };
+  const holdUntil = new Date(view.holdUntil).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
+  const usd = formatUsd;
+  const planName = PLAN_LABEL[plan] || plan;
+  let email = null;
+  if (mailOn() && TK.emailTemplate(schema, "wireInstructions").enabled) {
+    try {
+      const msg = await sendFamily(app, schema, "wireInstructions", {
+        amount: usd(amount), reference: view.wire.reference, holdUntil, link: acceptLink(token),
+        details: view.wire.lines.map(([k, v]) => `- ${k ? `**${k}:** ` : ""}${v}`).join("\n"), wireNote: view.wire.note,
+      });
+      const scrub = (x) => String(x || "").split(acceptLink(token)).join(acceptLink(""));
+      email = { to: msg.to, at: now.toISOString(), hubspot: await logFamilyEmail(app, { ...msg, text: scrub(msg.text), html: scrub(msg.html) }).catch(() => null) };
+    } catch (err) { log.error?.("[wire email]", err.message); email = { error: String(err.message).slice(0, 300) }; }
+  }
+  await patchEnrolment(app.id, { wire: { ...wire, email } });
+  if (hubspotOn() && (app.hubspot_contact_id || app.hubspot_deal_id)) {
+    try { await HS.addNote(`<p><strong>Paying by bank transfer</strong> — ${esc(usd(amount))} for the ${esc(planName)} option; reference "${esc(view.wire.reference)}". Terms v${esc(terms?.version || "?")} agreed. Mark the deposit paid in the dashboard when it arrives.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); }
+    catch (err) { log.error?.("[wire note]", err.message); }
+  }
+  if (alertOn()) {
+    try {
+      await sendAdmissionsAlert(app, "Paying by bank transfer", [
+        `They chose to pay ${usd(amount)} by bank transfer (${planName}), reference "${view.wire.reference}". Their place is held until ${holdUntil}.`,
+        "When the money arrives in Wise, open the application in the dashboard and use Mark deposit paid. They'll then be emailed to confirm their payment plan. If it's slow to arrive, use Extend hold.",
+      ]);
+    } catch (err) { log.error?.("[wire alert]", err.message); }
+  }
+  return { ok: true, wire: { ...wire, email } };
 }

@@ -4,6 +4,7 @@
 //   GET  /api/accept/offer?token=&session_id=   what the page shows (and, on
 //                                               return from Stripe, records it)
 //   POST /api/accept/checkout { token, plan, method, agree }  → { url }
+//   POST /api/accept/wire { token, plan, agree }              → { ok }  (paying by bank transfer: emails the details)
 //   POST /api/accept/pay-item { token, index, method }        → { url }  (balance / failed payment)
 //   POST /api/accept/update-method { token }                  → { url }  (new card / bank account)
 import { json, readJson, errorResponse } from "./_lib/http.mjs";
@@ -39,6 +40,12 @@ export default async (req) => {
       if (!app) throw bad("We couldn't find your acceptance.", 404);
       const out = await E.startCheckout(app, { plan: body.plan, method: body.method, agree: body.agree === true, token: body.token }, schema);
       return json(out);
+    }
+    if (req.method === "POST" && route === "wire") {
+      const body = await readJson(req);
+      const app = await A.byToken(body.token);
+      if (!app) throw bad("We couldn't find your acceptance.", 404);
+      return json(await E.startWire(app, { plan: body.plan, agree: body.agree === true, token: body.token }, schema));
     }
     if (req.method === "POST" && (route === "pay-item" || route === "update-method")) {
       const body = await readJson(req);

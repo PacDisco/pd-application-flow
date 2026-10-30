@@ -31,7 +31,7 @@ import * as TK from "../../../public/terms-kit.mjs";
 import { chargeSaved, expireCheckout, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
 import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
-import { acceptLink, paidSoFar, payOffSaving, familyDiscounts } from "./enrol.mjs";
+import { acceptLink, paidSoFar, payOffSaving, familyDiscounts, wireReference } from "./enrol.mjs";
 import { dealPaid } from "./deal-paid.mjs";
 
 const DAY = 864e5;
@@ -120,6 +120,7 @@ export function depositAction(e, decision, now, cfg) {
   const hold = new Date(holdUntil);
   if (now >= hold) return e.holdExpired?.holdUntil === holdUntil ? { action: "none" } : { action: "expired", holdUntil };
   if (now - new Date(decision.at || 0) < DAY) return { action: "none", reason: "just accepted" };
+  if (e.wire) return { action: "none", reason: "paying by bank transfer" };
   const left = (hold - now) / DAY;
   const stage = [...DEPOSIT_REMIND_LEFT].sort((a, b) => a - b).find((d) => left <= d);
   if (stage == null) return { action: "none" };
@@ -156,6 +157,8 @@ export function discountAction(app, e, decision, schema, now, cfg) {
   if (decision?.at && now - new Date(decision.at) < DAY) return { action: "none", reason: "just accepted" };
   const sv = savingsNow(app, e, decision, schema, now);
   if (!sv) return { action: "none" };
+  // On "balance later" the balance reminders (14 and 3 days before it's due) already carry the saving.
+  if (sv.kind === "payOff") return { action: "none", reason: "in the balance reminders" };
   const today = localDay(now, cfg.tz);
   const left = Math.round((P.day(sv.until) - P.day(today)) / DAY);
   if (left < 0) return { action: "none" };
@@ -166,6 +169,14 @@ export function discountAction(app, e, decision, schema, now, cfg) {
   const last = Math.max(0, ...Object.values(e.depositReminded || {}).map((t) => Date.parse(t) || 0));
   if (now - last < MIN_GAP_MS) return { action: "none", reason: "sent recently" };
   return { action: "remind", stage, savings: sv };
+}
+
+/** For families who paid by bank transfer: the account details again, for the next transfer (emails). */
+export function wireBlock(app, e, schema, amount) {
+  const w = e?.wire && TK.wireDetails(schema);
+  if (!w) return "";
+  return [`Paying by bank transfer again? Send **${usd(amount)}** (USD) to the same account, with **${e.wire.reference || wireReference(app)}** as the reference:`, "",
+    ...w.lines.map(([k, v]) => `- ${k ? `**${k}:** ` : ""}${v}`), "", w.note].join("\n");
 }
 
 /** "Pay in full and save $500, or in two instalments and save $250" (offer savings, for the emails). */
@@ -398,7 +409,7 @@ async function balanceReminder(app, e, idx, stage, schema, now, log) {
   try {
     const po = payOffSaving(app, e, schema, now);
     const savingLine = po ? `Pay it by ${longDate(po.until)} and we'll take ${usd(po.amount)} off — you'd pay ${usd(po.pay)}, the same saving as paying in full.` : "";
-    const email = await familyEmail(app, schema, "balanceReminder", { amount: usd(item.amount), date: longDate(item.due), savingLine }, { log });
+    const email = await familyEmail(app, schema, "balanceReminder", { amount: usd(item.amount), date: longDate(item.due), savingLine, wireDetails: wireBlock(app, e, schema, po ? po.pay : item.amount) }, { log });
     if (!email.skipped) await updateItem(app.id, idx, ["due"], { reminderEmail: email });
     return { reminded: stage };
   } catch (err) {
@@ -441,7 +452,7 @@ async function discountReminder(app, e, act, schema, now, log) {
   if (!(await claimKey(app.id, "discountReminded", key, now.toISOString()))) return { skipped: "taken" };
   try {
     const vars = sv.kind === "payOff"
-      ? { saving: usd(sv.amount), rest: usd(sv.rest), payNow: usd(sv.pay), until: longDate(sv.until) }
+      ? { saving: usd(sv.amount), rest: usd(sv.rest), payNow: usd(sv.pay), until: longDate(sv.until), wireDetails: wireBlock(app, e, schema, sv.pay) }
       : { savings: savingsText(sv), until: longDate(sv.until) };
     const email = await familyEmail(app, schema, sv.kind === "payOff" ? "payOffEnding" : "savingsEnding", vars, { log });
     if (!email.skipped) await note(app, `<p><strong>Savings reminder sent</strong> — ${esc(savingsText(sv))}, until ${esc(sv.until)}.</p>`, log);
@@ -460,7 +471,7 @@ async function holdExpired(app, e, act, now, log) {
   if (!rows.length) return { skipped: "taken" };
   await note(app, `<p><strong>Hold passed</strong> — no deposit by ${esc(new Date(act.holdUntil).toLocaleString("en-US", { timeZone: process.env.INTERVIEW_TZ || "America/Denver" }))}. Extend the hold in the dashboard if they still want the place.</p>`, log);
   if (alertOn()) {
-    try { await sendAdmissionsAlert(app, "Deposit not paid — hold passed", ["This applicant was accepted but hasn't paid the deposit, and the hold on their place has passed.", "If they still want the place, use Extend hold in the dashboard — their acceptance link then works again."]); }
+    try { await sendAdmissionsAlert(app, "Deposit not paid — hold passed", [e.wire ? `This applicant said they'd pay ${usd(e.wire.amount)} by bank transfer (reference "${e.wire.reference}"), but it hasn't been marked as received and the hold on their place has passed.` : "This applicant was accepted but hasn't paid the deposit, and the hold on their place has passed.", e.wire ? "Check Wise for the transfer — if it's arrived, use Mark deposit paid; if it's on its way, use Extend hold." : "If they still want the place, use Extend hold in the dashboard — their acceptance link then works again."]); }
     catch (err) { log.error?.("[payments hold alert]", err.message); }
   }
   return { holdExpired: true };
@@ -660,12 +671,7 @@ async function recordRest(session, schema, idxs, status, log) {
   await hubspotPayment(app, Number(m.base_amount), reference, new Date().toISOString(), log);
   if (discount) {
     await patchEnrolment(appId, { payOff: { discount, reference, at: new Date().toISOString() } });
-    // The deal's amount becomes what they actually paid overall.
-    const tuition = Number(e2.offer?.tuition) || 0;
-    if (hubspotOn() && app.hubspot_deal_id && tuition) {
-      try { await HS.updateDeal(app.hubspot_deal_id, { amount: String(Math.round((tuition - (Number(e2.deposit?.discount) || 0) - discount) * 100) / 100) }); }
-      catch (err) { log.error?.("[payments payoff deal]", err.message); }
-    }
+    await payOffDealAmount(app, e2, discount, log);
   }
   await note(app, `<p><strong>Remaining tuition paid in full</strong> — ${usd(total)} by ${methodName(m.method)} (${esc(reference)}), covering ${mine.length} payment${mine.length === 1 ? "" : "s"}.${discount ? ` Includes the ${usd(discount)} pay-in-full saving for paying off early (deal amount reduced).` : ""}</p>`, log);
   try { await familyEmail(app, schema, "paymentReceived", { amount: usd(total), balanceLine: balanceLine(last.schedule) }, { log }); }
@@ -858,13 +864,33 @@ async function recordPrepaid(app, { total, deposit = null, reference = "", by = 
 }
 
 /** Admissions: paid outside Stripe (e.g. a bank transfer) — mark it so it isn't charged too. */
-export async function markPaidOutside(appId, idx, { by = "admissions", reference = "" } = {}, schema) {
+export async function markPaidOutside(appId, idx, { by = "admissions", reference = "" } = {}, schema, { now = new Date(), log = console } = {}) {
   const ref = String(reference || "").trim().slice(0, 120) || `manual-${new Date().toISOString().slice(0, 10)}`;
-  const e = await itemPaid(appId, Number(idx), { reference: ref, method: "manual", by }, schema, { from: ["scheduled", "failed", "needs_admissions", "due"], quiet: true });
+  const OPENISH = ["scheduled", "failed", "needs_admissions", "due"];
+  let app = await A.byId(appId);
+  // The last payment on "balance later", paid (e.g. by wire) before the discounts end: the pay-in-full saving applies.
+  const { enrolment: before } = await readEnrolment(appId);
+  const po = payOffSaving(app, before, schema, now);
+  const open = (before.schedule || []).map((p, i) => i).filter((i) => i > 0 && OPENISH.includes(before.schedule[i].status));
+  const discount = po && open.length === 1 && open[0] === Number(idx) ? po.amount : 0;
+  if (discount) await applyPayOffDiscount(appId, before, [Number(idx)], discount, OPENISH);
+  const e = await itemPaid(appId, Number(idx), { reference: ref, method: "manual", by }, schema, { from: OPENISH, quiet: true });
   if (!e) throw bad("That payment isn't open.", 409);
-  const app = await A.byId(appId);
-  await note(app, `<p><strong>Marked paid outside Stripe</strong> by ${esc(by)} — ${usd(e.schedule[idx].amount)} due ${esc(e.schedule[idx].due)} (${esc(ref)}). It won't be charged automatically.</p>`);
-  return e.schedule[idx];
+  app = await A.byId(appId);
+  if (discount) {
+    await patchEnrolment(appId, { payOff: { discount, reference: ref, at: now.toISOString(), by } });
+    await payOffDealAmount(app, e, discount, log);
+  }
+  await note(app, `<p><strong>Marked paid outside Stripe</strong> by ${esc(by)} — ${usd(e.schedule[idx].amount)} due ${esc(e.schedule[idx].due)} (${esc(ref)}). It won't be charged automatically.${discount ? ` Includes the ${usd(discount)} pay-in-full saving (paid before the discounts ended; deal amount reduced).` : ""}</p>`);
+  return { ...e.schedule[idx], ...(discount ? { payOffDiscount: discount } : {}) };
+}
+
+/** After a pay-off saving: the deal's amount becomes what they actually paid overall. */
+async function payOffDealAmount(app, e, discount, log = console) {
+  const tuition = Number(e.offer?.tuition) || 0;
+  if (!hubspotOn() || !app.hubspot_deal_id || !tuition) return;
+  try { await HS.updateDeal(app.hubspot_deal_id, { amount: String(Math.round((tuition - (Number(e.deposit?.discount) || 0) - discount) * 100) / 100) }); }
+  catch (err) { log.error?.("[payments payoff deal]", err.message); }
 }
 
 /** The application behind a HubSpot deal, if `email` is the student or a parent on it. */

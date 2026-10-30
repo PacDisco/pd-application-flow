@@ -59,11 +59,15 @@ function render() {
     $('#view').innerHTML = `<section class="card"><h1 class="serif">No offer to confirm</h1><p class="lead">There's nothing to confirm on this application right now. If you think that's wrong, email <a href="mailto:admissions@pacificdiscovery.org">admissions@pacificdiscovery.org</a>.</p></section>`;
     return;
   }
-  if (!S.plan) S.plan = (o.options.find((x) => x.primary) || o.options[0]).key;
+  if (!S.plan) S.plan = (o.options.find((x) => x.key === o.wirePlan) || o.options.find((x) => x.primary) || o.options[0]).key;
   const main = o.options.filter((x) => !x.quiet);
   const quiet = o.options.find((x) => x.quiet);
   const sel = o.options.find((x) => x.key === S.plan) || main[0];
-  const charge = todayCharge(sel, o.rates[S.method]);
+  const wire = S.method === 'wire' && o.wire;
+  if (S.method === 'wire' && !o.wire) S.method = 'card';
+  const charge = todayCharge(sel, wire ? 0 : o.rates[S.method]);
+  const showWire = o.wire && (o.wire.international || S.method === 'wire');
+  const req = o.wire?.requested;
   const later = sel.payments.slice(1);
   const pre = !!o.prepaid;
   const instal = (x) => x.payments.some((p) => p.kind === 'instalment');
@@ -120,29 +124,39 @@ function render() {
   </section>
   <section class="card">
     <h2 class="serif">Pay with</h2>
-    <div class="methods" role="radiogroup" aria-label="Payment method">
+    ${req ? `<p class="note">You told us on ${esc(dateL(req.at))} that you're paying <strong>${money(req.amount)}</strong> by bank transfer — we've emailed you the details. Once it arrives we'll confirm your place by email. You can also pay by card or US bank account below.</p>` : ''}
+    <div class="methods${showWire ? ' methods--3' : ''}" role="radiogroup" aria-label="Payment method">
       <label class="opt" data-on="${S.method === 'card'}"><input type="radio" name="method" value="card"${S.method === 'card' ? ' checked' : ''}><span><span class="t">Card</span><span class="d" style="display:block">${o.rates.card ? `${pct(o.rates.card)} processing fee` : 'No fee'}</span></span></label>
       <label class="opt" data-on="${S.method === 'ach'}"><input type="radio" name="method" value="ach"${S.method === 'ach' ? ' checked' : ''}><span><span class="t">US bank account</span><span class="d" style="display:block">${o.rates.ach ? `${pct(o.rates.ach)} fee` : 'No fee'} · takes a few days to clear</span></span></label>
+      ${showWire ? `<label class="opt" data-on="${S.method === 'wire'}"><input type="radio" name="method" value="wire"${S.method === 'wire' ? ' checked' : ''}><span><span class="t">Bank transfer (wire)</span><span class="d" style="display:block">From any country · no fee from us</span></span></label>` : ''}
     </div>
-    <table class="sum" aria-label="Today">
+    ${o.wire && !showWire ? `<p class="wire-link"><button type="button" class="quiet" id="wire-link">Paying from outside the US, or prefer a wire transfer? Pay by bank transfer</button></p>` : ''}
+    ${wire ? `<div class="wire" aria-label="Bank transfer details">
+      <p style="margin:0 0 8px">Send <strong>${money(charge.base)}</strong> in US dollars to:</p>
+      <table class="sum">${o.wire.lines.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}
+        <tr><td>Payment reference</td><td><strong>${esc(o.wire.reference)}</strong></td></tr></table>
+      <p class="small" style="margin:8px 0 0">${esc(o.wire.note)} We hold your place until ${esc(dateL(o.holdUntil))} and confirm it by email once the transfer arrives.${instal(sel) ? ' We\'ll then ask you to save a card or bank account for the later payments.' : ''}</p>
+    </div>` : `<table class="sum" aria-label="Today">
       ${sel.discount && sel.key === 'full' ? `<tr><td>Tuition balance</td><td>${money(sel.fullPrice)}</td></tr><tr><td>Pay-in-full discount</td><td>−${money(sel.discount)}</td></tr>` : `<tr><td>${sel.key === 'full' ? 'Tuition balance' : sel.payments[0].amount > o.deposit ? 'Deposit + first instalment' : 'Deposit'}</td><td>${money(charge.base)}</td></tr>`}
       ${charge.fee ? `<tr><td>${S.method === 'ach' ? 'Bank payment fee' : 'Card processing fee'} (${pct(o.rates[S.method])})</td><td>${money(charge.fee)}</td></tr>` : ''}
       <tr class="total"><td>Today</td><td>${money(charge.total)}</td></tr>
-    </table>
+    </table>`}
     ${charge.base <= 0 ? `<p class="small" style="margin:8px 0 0">${instal(sel) ? 'Nothing to pay today. You\'ll save your card or bank account for the automatic payments, and we email you 3 days before each one.' : 'Nothing to pay today.'}</p>` : ''}
     <label class="agree"><input type="checkbox" id="agree"${S.agree ? ' checked' : ''}><span>I agree to the ${o.terms ? `<a href="${esc(o.terms.url)}" target="_blank" rel="noopener">${esc(o.terms.title)}</a> (version ${esc(o.terms.version)})` : 'Program Terms & Conditions'}, including the payment and refund terms.</span></label>
-    <div class="pay"><span class="small">Secure payment by Stripe. You'll come straight back here.</span>
-      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>${charge.base > 0 ? `Pay ${money(charge.total)} and ${pre ? 'confirm my plan' : 'confirm my place'} →` : instal(sel) ? 'Save my payment details →' : 'Confirm my plan →'}</button></div>
+    <div class="pay"><span class="small">${wire ? 'We\'ll email these details to you and your parents.' : 'Secure payment by Stripe. You\'ll come straight back here.'}</span>
+      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>${wire ? 'Email me the details and hold my place →' : charge.base > 0 ? `Pay ${money(charge.total)} and ${pre ? 'confirm my plan' : 'confirm my place'} →` : instal(sel) ? 'Save my payment details →' : 'Confirm my plan →'}</button></div>
   </section>
   ${advisorCard(o)}`;
   document.querySelectorAll('input[name=plan]').forEach((el) => el.addEventListener('change', () => { S.plan = el.value; render(); }));
   document.querySelectorAll('input[name=method]').forEach((el) => el.addEventListener('change', () => { S.method = el.value; render(); }));
+  $('#wire-link')?.addEventListener('click', () => { S.method = 'wire'; render(); });
   $('#later')?.addEventListener('click', () => { S.plan = S.plan === 'later' ? (main.find((x) => x.primary) || main[0]).key : 'later'; render(); });
   $('#agree').addEventListener('change', (e) => { S.agree = e.target.checked; $('#pay').disabled = !S.agree; });
   $('#pay').addEventListener('click', pay);
 }
 
 async function pay(e) {
+  if (S.method === 'wire') return payByWire(e);
   const btn = e.currentTarget;
   btn.disabled = true; btn.textContent = 'Opening secure checkout…';
   try {
@@ -150,6 +164,23 @@ async function pay(e) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Something went wrong.');
     location.href = data.url;
+  } catch (err) {
+    say('bad', esc(err.message));
+    btn.disabled = false; render();
+  }
+}
+
+async function payByWire(e) {
+  const btn = e.currentTarget;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const res = await fetch('/api/accept/wire', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, plan: S.plan, agree: S.agree }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+    S.offer.wire = { ...S.offer.wire, requested: { plan: data.wire.plan, amount: data.wire.amount, at: data.wire.at } };
+    say('ok', "Thanks — we've emailed you the bank transfer details. Once your transfer arrives we'll confirm your place by email.");
+    render();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   } catch (err) {
     say('bad', esc(err.message));
     btn.disabled = false; render();
@@ -182,6 +213,11 @@ function renderEnrolled(o) {
     ${restRow ? (po ? `<div class="pay" style="margin-top:8px"><span>Everything remaining: <s>${money(po.rest)}</s> <strong>${money(po.pay)}</strong> <span class="tag tag--save">Save ${money(po.amount)}</span></span>
       <button class="btn btn--go" type="button" data-pay="rest">Pay ${money(withFee(po.pay))} →</button></div>` : `<div class="pay" style="margin-top:8px"><span>Everything remaining: <strong>${money(o.rest)}</strong></span>
       <button class="btn ${payable.length ? 'btn--line' : 'btn--go'}" type="button" data-pay="rest">Pay ${money(withFee(o.rest))} →</button></div>`) : ''}
+    ${o.wire && !needed ? `<details class="wire-alt"${o.deposit?.method === 'manual' ? ' open' : ''}><summary>Paying by bank transfer again?</summary><div class="wire" style="margin-top:10px">
+      <p style="margin:0 0 8px">Send <strong>${money(po ? po.pay : o.rest)}</strong> in US dollars${po ? ` by ${esc(dateL(po.until))} (that includes your ${money(po.amount)} saving)` : ''} to:</p>
+      <table class="sum">${o.wire.lines.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}
+        <tr><td>Payment reference</td><td><strong>${esc(o.wire.reference)}</strong></td></tr></table>
+      <p class="small" style="margin:8px 0 0">${esc(o.wire.note)} Once it arrives we'll mark it paid and email you a receipt.</p></div></details>` : ''}
   </section>` : '';
   const top = payable.length || po;
   $('#view').innerHTML = `${top ? payBox : ''}<section class="card">

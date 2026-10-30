@@ -483,7 +483,7 @@ await t('balance later: paying the balance before the discounts end takes the pa
   const { id, token, deal } = await enrolled('payoff@x.org', 'later');
   delete schema.settings.discounts;
   const o = (await api(`offer?token=${token}`)).body.offer;
-  assert.deepEqual(o.payOff, { amount: 500, rest: 13000, pay: 12500, until: '2027-07-10' });
+  assert.deepEqual(o.payOff, { amount: 500, rest: 13000, pay: 12500, until: '2027-06-11' }, 'deadline = the balance due date (before the discount cutoff)');
   const r = await api('pay-item', { token, index: 'rest', method: 'card' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const s = up.stripe.sessions.get(r.body.url.split('/').pop());
@@ -502,26 +502,22 @@ await t('balance later: paying the balance before the discounts end takes the pa
   assert.equal(o2.rest, 0); assert.equal(o2.payOff, null);
 });
 
-await t('balance later: balance reminder mentions the saving; "savings end" emails 14 and 3 days before, then none', async () => {
+await t('balance later: the balance reminders (14 and 3 days before it is due) carry the saving; no separate "savings end" emails; overdue = no saving', async () => {
   schema.settings.discounts = DISC;
   const { token } = await enrolled('payoff2@x.org', 'later');
   delete schema.settings.discounts;
   const runs = async (day) => { const before = mails.length; for (let i = 0; i < 4; i++) await run(at(day)); return mails.slice(before); };
-  const rem = (await runs('2027-05-28')).filter((m) => /balance/i.test(m.subject));
-  assert.equal(rem.length, 1);
-  assert.match(rem[0].text, /Pay it by July 10, 2027 and we'll take \$500 off/);
-  const m14 = (await runs('2027-06-26')).filter((m) => /save/i.test(m.subject));
-  assert.equal(m14.length, 1, 'one reminder');
-  assert.match(m14[0].subject, /Last chance to save \$500/);
-  assert.match(m14[0].text, /July 10, 2027/);
-  assert.ok(m14[0].to.includes('payoff2@x.org'));
-  assert.equal((await runs('2027-06-27')).filter((m) => /save/i.test(m.subject)).length, 0);
-  assert.equal((await runs('2027-07-07')).filter((m) => /save/i.test(m.subject)).length, 1, '3 days before');
-  assert.equal((await runs('2027-07-11')).filter((m) => /save/i.test(m.subject)).length, 0, 'over');
+  const rem = (await runs('2027-05-28')).filter((m) => m.to.includes('payoff2@x.org'));
+  assert.equal(rem.length, 1, 'one email: the balance reminder');
+  assert.match(rem[0].subject, /balance/i);
+  assert.match(rem[0].text, /Pay it by June 11, 2027 and we'll take \$500 off/);
+  const rem3 = (await runs('2027-06-08')).filter((m) => m.to.includes('payoff2@x.org'));
+  assert.equal(rem3.length, 1); assert.match(rem3[0].text, /\$500 off/);
+  assert.equal((await runs('2027-06-26')).filter((m) => /save/i.test(m.subject)).length, 0, 'no "savings end" email');
   const { payOffSaving } = await import('../netlify/functions/_lib/enrol.mjs');
   const e = await enrolment((await pool.query(`SELECT id FROM applications WHERE email = 'payoff2@x.org'`)).rows[0].id);
-  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-07-10')).amount, 500, 'last day');
-  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-07-11')), null, 'saving gone after the last day');
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-06-11')).amount, 500, 'due date');
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-06-12')), null, 'overdue: no saving');
   assert.ok(token);
 });
 

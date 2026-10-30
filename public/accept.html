@@ -54,7 +54,16 @@ h1,h2,h3{color:var(--ink);margin:0}
 .sched td{padding:6px 0;border-bottom:1px dashed var(--line)}
 .sched td:last-child{text-align:right}
 .methods{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 16px}
+.methods--3{grid-template-columns:1fr 1fr 1fr}
+@media (max-width:720px){.methods--3{grid-template-columns:1fr}}
 @media (max-width:520px){.methods{grid-template-columns:1fr}}
+.wire-link{margin:-6px 0 14px}
+.wire-alt{margin-top:14px}
+.wire-alt summary{cursor:pointer;color:var(--muted);font-size:14px;text-decoration:underline}
+.wire{margin:0 0 12px;padding:14px 16px;border-radius:10px;background:#f6fbfc;border:1px solid #cfe3e8}
+.wire .sum{margin:0}
+.wire .sum td:last-child{text-align:right;word-break:break-word}
+.note{margin:0 0 14px;padding:10px 14px;border-radius:8px;background:#eef7f0;border:1px solid #bfdcc6;font-size:15px}
 .agree{display:flex;gap:10px;align-items:flex-start;margin:16px 0;font-size:15px}
 .agree input{margin-top:4px;width:18px;height:18px;accent-color:var(--teal)}
 .pay{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding-top:16px}

@@ -368,6 +368,84 @@ await t('pay-in-full discount by program type; off → none', async () => {
   assert.equal(E.payInFullDiscount({ ...st, settings: { payInFull: { ...st.settings.payInFull, enabled: false } } }, { program: 'South America Gap Semester' }), 0);
 });
 
+await t('bank transfer: a link for US families, an option for families abroad; choosing it emails the details, tells admissions, stops deposit reminders; admissions marks it paid', async () => {
+  const { id, token, deal } = await acceptedApp('wire@x.org');
+  let o = (await offer(token)).body.offer;
+  assert.equal(o.wire.international, false, 'no country → treated as US');
+  assert.equal(o.wire.reference, 'Sam Lee - Pacific Discovery');
+  assert.deepEqual(o.wire.lines.find(([k]) => /SWIFT/.test(k)), ['SWIFT/BIC (from outside the US)', 'TRWIUS35XXX']);
+  await pool.query(`UPDATE applications SET answers = answers || '{"homeCountry":"New Zealand"}' WHERE id = $1`, [id]);
+  o = (await offer(token)).body.offer;
+  assert.equal(o.wire.international, true);
+  const post = async (body) => {
+    const res = await accept(new Request('https://apply.example.org/api/accept/wire', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, ...body }) }));
+    return { status: res.status, body: await res.json() };
+  };
+  assert.equal((await post({ plan: 'monthly', agree: false })).status, 400, 'terms first');
+  const before = mails.length;
+  const r = await post({ plan: 'monthly', agree: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.wire.amount, 2250);
+  const sent = mails.slice(before);
+  const fam = sent.find((m) => /Bank transfer details/.test(m.subject));
+  assert.ok(fam, 'family emailed');
+  assert.match(fam.to, /wire@x\.org/); assert.match(fam.to, /parent\.wire@x\.org/);
+  assert.match(fam.text, /\$2,250/); assert.match(fam.text, /216617201640/); assert.match(fam.text, /TRWIUS35XXX/); assert.match(fam.text, /Sam Lee - Pacific Discovery/);
+  assert.ok(sent.some((m) => /Paying by bank transfer/.test(m.subject) && /admissions@/.test(m.to)), 'admissions told');
+  // double click → no second email
+  const n2 = mails.length;
+  assert.equal((await post({ plan: 'monthly', agree: true })).status, 200);
+  assert.equal(mails.length, n2);
+  assert.equal((await offer(token)).body.offer.wire.requested.amount, 2250);
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  const { enrolment: e, decision: d } = { enrolment: await enrolment(id), decision: (await pool.query('SELECT decision FROM applications WHERE id = $1', [id])).rows[0].decision };
+  const later = new Date(new Date(d.holdUntil).getTime() - 864e5);
+  assert.equal(PAY.depositAction(e, d, later, { depositReminders: true }).reason, 'paying by bank transfer');
+  // the transfer arrives: admissions marks it paid → they choose / confirm their plan
+  await PAY.markDepositPaid(id, { amount: 2250, reference: 'Wise 999', by: 'Megan' }, schema, { log: quiet });
+  o = (await offer(token)).body.offer;
+  assert.equal(o.prepaid, 2500);
+  assert.equal(o.wire, null, 'no transfer box once the deposit is in');
+  assert.equal(o.wirePlan, 'monthly', 'the plan they picked is preselected');
+  assert.ok(deal);
+});
+
+await t('wire deposit → "balance later" → balance by wire: details on the page and in the reminder; marked paid before the cutoff gets the pay-in-full saving', async () => {
+  schema.settings.discounts = { enabled: true, full: { semester: 500 }, two: { semester: 250 } };
+  const { id, token, deal } = await acceptedApp('wire2@x.org');
+  delete schema.settings.discounts;
+  const post = async (path, body) => {
+    const res = await accept(new Request(`https://apply.example.org/api/accept/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, ...body }) }));
+    return { status: res.status, body: await res.json() };
+  };
+  assert.equal((await post('wire', { plan: 'later', agree: true })).status, 200);
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  await PAY.markDepositPaid(id, { amount: 2250, reference: 'Wise 1', by: 'Megan' }, schema, { log: quiet });
+  let o = (await offer(token)).body.offer;
+  assert.equal(o.wirePlan, 'later');
+  const r = await checkout({ token, plan: 'later', method: 'card', agree: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  o = (await offer(token)).body.offer;
+  assert.equal(o.state, 'enrolled');
+  assert.ok(o.wire, 'transfer details for the balance');
+  assert.equal(o.payOff.amount, 500);
+  // the balance reminder carries the account details and the saving
+  const e = await enrolment(id);
+  const before = mails.length;
+  await PAY.runPayments({ schema, now: new Date(`${new Date(new Date(`${e.schedule[1].due}T12:00:00Z`).getTime() - 14 * 864e5).toISOString().slice(0, 10)}T18:00:00Z`), log: quiet });
+  const rem = mails.slice(before).find((m) => /balance/i.test(m.subject));
+  assert.ok(rem, 'reminder sent');
+  assert.match(rem.text, /216617201640/); assert.match(rem.text, /Send \$12,500/); assert.match(rem.text, /Sam Lee - Pacific Discovery/);
+  // the wire arrives; admissions marks it paid before the cutoff → saving applied, deal reduced
+  assert.equal(o.payOff.until, e.schedule[1].due, 'by the balance due date');
+  const item = await PAY.markPaidOutside(id, 1, { by: 'Megan', reference: 'Wise 2' }, schema, { now: new Date('2027-06-01T18:00:00Z'), log: quiet });
+  assert.equal(item.amount, 12500);
+  assert.equal(item.payOffDiscount, 500);
+  assert.equal((await enrolment(id)).payOff.discount, 500);
+  assert.equal(up.crm.deals.get(deal).properties.amount, '15000');
+  assert.equal((await offer(token)).body.offer.rest, 0);
+});
+
 up.restore();
 await pool.end();
 console.log(`enrol: ${n} passed`);

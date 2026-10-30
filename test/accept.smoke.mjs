@@ -89,6 +89,38 @@ try {
     await page.close();
     console.log(`  ✓ ${tag}: offer → choose plan + method → Stripe → confirmed`);
   }
+  // bank transfer: a quiet link for US families, a third option for families abroad
+  for (const [country, tag] of [[null, 'us'], ['New Zealand', 'intl']]) {
+    const { id, token } = await acceptedApp(`wire.${tag}@x.org`);
+    if (country) await pool.query(`UPDATE applications SET answers = answers || $2::jsonb WHERE id = $1`, [id, JSON.stringify({ homeCountry: country })]);
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.route('https://fonts.googleapis.com/**', (r) => r.fulfill({ body: '', contentType: 'text/css' }));
+    await page.goto(`http://localhost:8898/accept?token=${token}`);
+    await page.waitForSelector('input[name=plan]');
+    if (!country) {
+      assert.equal(await page.$('input[name=method][value=wire]'), null, 'not a main option in the US');
+      if (SHOTS) await page.screenshot({ path: `${SHOTS}/wire-us-link.png`, fullPage: true });
+      await page.click('#wire-link');
+    } else {
+      assert.ok(await page.$('input[name=method][value=wire]'), 'an option abroad');
+      await page.check('input[name=method][value=wire]');
+    }
+    await page.waitForSelector('.wire');
+    assert.match(await page.textContent('.wire'), /TRWIUS35XXX/);
+    assert.match(await page.textContent('#pay'), /Email me the details/);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/wire-${tag}.png`, fullPage: true });
+    await page.check('#agree');
+    await page.click('#pay');
+    await page.waitForSelector('.banner--ok');
+    await page.waitForSelector('.note');
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/wire-${tag}-sent.png`, fullPage: true });
+    assert.ok(mails.some((m) => /Bank transfer details/.test(m.subject) && m.to.includes(`wire.${tag}@x.org`)));
+    assert.deepEqual(errors, []);
+    await page.close();
+    console.log(`  ✓ bank transfer (${tag})`);
+  }
   if (SHOTS) {
     const { writeFileSync } = await import('node:fs');
     for (const m of mails.filter((x) => /accepted|confirmed/.test(x.subject))) writeFileSync(`${SHOTS}/email-${/confirmed/.test(m.subject) ? 'enrolled' : 'accepted'}.html`, m.html);
