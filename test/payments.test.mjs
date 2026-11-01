@@ -521,6 +521,90 @@ await t('balance later: the balance reminders (14 and 3 days before it is due) c
   assert.ok(token);
 });
 
+// ── the price on the HubSpot deal ──────────────────────────────────────────
+const { __clearDealPaidCache } = await import('../netlify/functions/_lib/deal-paid.mjs');
+const setPrice = (deal, amount) => { up.crm.deals.get(deal).properties.amount = String(amount); __clearDealPaidCache(); };
+
+await t('repriceSchedule (pure): up spreads over open payments (or a new balance if none); down takes off, none below $0, the rest is overpaid', async () => {
+  const e = { schedule: [{ amount: 2250, status: 'paid' }, { amount: 1000, status: 'paid' }, { amount: 1000, status: 'scheduled' }, { amount: 1000, status: 'scheduled' }] };
+  let r = PAY.repriceSchedule(e, 300, '2027-01-01');
+  assert.deepEqual(r.schedule.slice(2).map((p) => p.amount), [1150, 1150]);
+  r = PAY.repriceSchedule(e, -500, '2027-01-01');
+  assert.deepEqual(r.schedule.slice(2).map((p) => p.amount), [750, 750]); assert.equal(r.unapplied, 0);
+  r = PAY.repriceSchedule(e, -2500, '2027-01-01');
+  assert.deepEqual(r.schedule.slice(2).map((p) => [p.amount, p.status]), [[0, 'cancelled'], [0, 'cancelled']]); assert.equal(r.unapplied, 500);
+  r = PAY.repriceSchedule({ schedule: [{ amount: 15000, status: 'paid' }] }, 400, '2027-01-01');
+  assert.deepEqual(r.added, { due: '2027-01-15', amount: 400, kind: 'balance', manual: true, status: 'due', reason: 'price change' });
+  assert.equal(PAY.repriceSchedule({ schedule: [{ status: 'paid' }, { amount: 5, status: 'processing' }] }, 10, '2027-01-01'), null, 'waits while a payment is in flight');
+});
+
+await t('before the deposit the price follows the deal: page, checkout and the stored offer', async () => {
+  const a = await accepted('price1@x.org');
+  setPrice(a.deal, 14000);
+  const o = (await api(`offer?token=${a.token}`)).body.offer;
+  assert.equal(o.tuition, 14000);
+  assert.equal(o.balance, 14000 - 250 - 2250);
+  assert.equal(o.options.find((x) => x.key === 'full').payments[0].amount, 14000 - 250);
+  const r = await api('checkout', { token: a.token, plan: 'monthly', method: 'card', agree: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal((await enrolment(a.id)).offer.tuition, 14000, 'stored offer updated');
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  const e = await enrolment(a.id);
+  assert.equal(e.schedule.slice(1).reduce((x, p) => x + p.amount, 0), 14000 - 2500, 'plan built on the deal price');
+  assert.equal(e.dealAmount, 14000, 'baseline recorded');
+});
+
+await t('after the deposit: admissions changes the deal price → remaining payments follow (once), family emailed, HubSpot note; up and down', async () => {
+  const a = await accepted('price2@x.org');
+  setPrice(a.deal, 15500);
+  const r = await api('checkout', { token: a.token, plan: 'monthly', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  const e0 = await enrolment(a.id);
+  assert.equal(e0.dealAmount, 15500);
+  const before = e0.schedule.slice(1).map((p) => p.amount);
+  setPrice(a.deal, 14700); // an $800 scholarship
+  const m = mails.length;
+  await run(at(addDays(e0.schedule[1].due, -10)));
+  let e = await enrolment(a.id);
+  assert.deepEqual(e.schedule.slice(1).map((p) => p.amount), before.map((x) => x - 100), '$800 over 8 payments');
+  assert.equal(e.offer.tuition, 14700); assert.equal(e.dealAmount, 14700);
+  assert.equal(e.priceChanges.length, 1);
+  const mail = mails.slice(m).find((x) => /schedule .* updated/i.test(x.subject));
+  assert.ok(mail, 'family emailed'); assert.match(mail.text, /\$15,500 to \*\*\$14,700\*\*|\$15,500 to \$14,700/);
+  await run(at(addDays(e0.schedule[1].due, -10)));
+  assert.equal((await enrolment(a.id)).priceChanges.length, 1, 'once');
+  // the page shows the new amounts straight away (no need to wait for the hourly run)
+  setPrice(a.deal, 15100);
+  const o = (await api(`offer?token=${a.token}`)).body.offer;
+  assert.deepEqual(o.schedule.slice(1).map((p) => p.amount), before.map((x) => x - 50));
+  e = await enrolment(a.id);
+  assert.equal(e.priceChanges.length, 2); assert.equal(e.offer.tuition, 15100);
+});
+
+await t('price change after paying in full: increase → a balance due in 14 days; decrease → admissions told to refund', async () => {
+  const a = await accepted('price3@x.org');
+  setPrice(a.deal, 15500);
+  const r = await api('checkout', { token: a.token, plan: 'full', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  setPrice(a.deal, 15800);
+  await run(at('2027-01-10'));
+  let e = await enrolment(a.id);
+  assert.deepEqual(e.schedule.at(-1), { due: '2027-01-24', amount: 300, kind: 'balance', manual: true, status: 'due', reason: 'price change' });
+  setPrice(a.deal, 15000);
+  const m = mails.length;
+  await run(at('2027-01-11'));
+  e = await enrolment(a.id);
+  assert.equal(e.schedule.at(-1).status, 'cancelled');
+  assert.equal(e.priceChanges.at(-1).unapplied, 500);
+  assert.ok(mails.slice(m).some((x) => /Overpaid/.test(x.subject) && /admissions@/.test(x.to)));
+});
+
 up.restore();
 await pool.end();
 console.log(`payments: ${n} passed`);

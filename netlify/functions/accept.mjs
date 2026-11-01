@@ -31,8 +31,14 @@ export default async (req) => {
       if (sid) { await E.confirmReturn(app, sid, schema); await PAY.confirmReturn(app, sid, schema); }
       const { enrolment, decision } = await E.readEnrolment(app.id);
       const terms = await publishedTermsOrNull();
-      const dealTotal = (await dealPaid(app))?.total ?? null;
-      return json({ offer: E.offerView(app, { enrolment, decision, dealTotal }, schema, terms) });
+      const deal = await dealPaid(app);
+      // Enrolled: if admissions changed the deal's price, the remaining payments follow it.
+      let enr = enrolment;
+      if (["paid"].includes(enrolment.deposit?.status) && deal?.amount) {
+        const r = await PAY.reconcileDealAmount(app, enrolment, schema, { dealAmount: deal.amount });
+        if (r?.enrolment) enr = r.enrolment;
+      }
+      return json({ offer: E.offerView(app, { enrolment: enr, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms) });
     }
     if (req.method === "POST" && route === "checkout") {
       const body = await readJson(req);

@@ -179,6 +179,89 @@ export function wireBlock(app, e, schema, amount) {
     ...w.lines.map(([k, v]) => `- ${k ? `**${k}:** ` : ""}${v}`), "", w.note].join("\n");
 }
 
+// ── price changes on the deal after the deposit ────────────────────────────
+
+/**
+ * Spread a price change (in dollars) over the payments still to come. Pure (tested).
+ * Up: shared across the open payments (or a new balance due in 14 days if
+ * nothing is left). Down: taken off the open payments (none below $0);
+ * anything left over has been overpaid. null while a payment is in flight.
+ * → { schedule, added, unapplied }
+ */
+export function repriceSchedule(e, delta, today) {
+  const sched = (e?.schedule || []).map((p) => ({ ...p }));
+  if (sched.some((p, i) => i > 0 && ["charging", "processing"].includes(p.status))) return null;
+  const open = sched.map((p, i) => i).filter((i) => i > 0 && OPEN.includes(sched[i].status));
+  let c = Math.round(delta * 100);
+  let added = null;
+  if (c > 0) {
+    if (!open.length) {
+      added = { due: addDays(today, 14), amount: c / 100, kind: "balance", manual: true, status: "due", reason: "price change" };
+      sched.push(added);
+    } else {
+      P.split(c, open.length).forEach((share, k) => { const p = sched[open[k]]; p.amount = (Math.round(p.amount * 100) + share) / 100; p.priceChange = (Math.round((p.priceChange || 0) * 100) + share) / 100; });
+    }
+    return { schedule: sched, added, unapplied: 0 };
+  }
+  let cut = -c;
+  const shares = P.split(cut, Math.max(1, open.length));
+  const take = (i, want) => { const p = sched[i]; const have = Math.round(p.amount * 100); const t = Math.min(have, want); p.amount = (have - t) / 100; p.priceChange = (Math.round((p.priceChange || 0) * 100) - t) / 100; if (p.amount <= 0) Object.assign(p, { status: "cancelled", cancelledReason: "price change" }); return t; };
+  open.forEach((i, k) => { cut -= take(i, shares[k]); });
+  for (const i of [...open].reverse()) { if (cut <= 0) break; if (sched[i].status !== "cancelled") cut -= take(i, cut); }
+  return { schedule: sched, added: null, unapplied: cut / 100 };
+}
+
+/**
+ * The deal's amount was changed in HubSpot after the deposit → the remaining
+ * payments follow it (once per change), the family is emailed the new schedule,
+ * HubSpot gets a note, admissions is alerted if they've now overpaid.
+ * The baseline is enrolment.dealAmount (what the deal said after the deposit
+ * and pd-apply's own discount updates); with no baseline yet it's just recorded.
+ */
+export async function reconcileDealAmount(app, e, schema, { dealAmount, now = new Date(), log = console } = {}) {
+  const amount = Math.round(Number(dealAmount) * 100) / 100;
+  if (!(amount > 0) || e?.deposit?.status !== "paid" || e.withdrawn || !e.offer) return null;
+  if (e.dealAmount == null) {
+    await db().query(`UPDATE applications SET enrolment = enrolment || jsonb_build_object('dealAmount', $2::numeric) WHERE id = $1 AND NOT (enrolment ? 'dealAmount')`, [app.id, amount]);
+    return { baseline: amount };
+  }
+  const base = Number(e.dealAmount);
+  const delta = Math.round((amount - base) * 100) / 100;
+  if (Math.abs(delta) < 0.01) return null;
+  const today = localDay(now, paymentSettings(schema).tz);
+  const r = repriceSchedule(e, delta, today);
+  if (!r) return { busy: true };
+  const change = { at: now.toISOString(), from: base, to: amount, delta, unapplied: r.unapplied, added: !!r.added };
+  const offer = { ...e.offer, tuition: Math.round((Number(e.offer.tuition) + delta) * 100) / 100 };
+  const rows = await db().query(
+    `UPDATE applications
+        SET enrolment = enrolment || jsonb_build_object('schedule', $2::jsonb, 'offer', $3::jsonb, 'dealAmount', $4::numeric,
+                                                        'priceChanges', COALESCE(enrolment->'priceChanges', '[]'::jsonb) || $5::jsonb),
+            updated_at = now()
+      WHERE id = $1 AND (enrolment->>'dealAmount')::numeric = $6
+      RETURNING enrolment`,
+    [app.id, JSON.stringify(r.schedule), JSON.stringify(offer), amount, JSON.stringify([change]), base]);
+  if (!rows.length) return { skipped: "taken" };
+  const enrolment = rows[0].enrolment;
+  const upcoming = enrolment.schedule.filter((p, i) => i > 0 && OPEN.includes(p.status));
+  await note(app, `<p><strong>Price changed on the deal</strong> — ${usd(base)} → ${usd(amount)} (${delta > 0 ? "+" : ""}${usd(delta)}). ${r.added ? `Nothing was left to pay, so a balance of ${usd(delta)} is now due ${esc(r.added.due)}.` : `Spread over the ${upcoming.length} remaining payment${upcoming.length === 1 ? "" : "s"}.`}${r.unapplied > 0 ? ` <strong>They've overpaid by ${usd(r.unapplied)}</strong> — admissions alerted to refund.` : ""}</p>`, log);
+  try {
+    const schedule = upcoming.length
+      ? upcoming.map((p) => `- ${longDate(p.due)} — ${usd(p.amount)}${p.manual ? " (due by this date)" : " (automatic)"}`).join("\n")
+      : "- Nothing more to pay.";
+    const changeNote = r.unapplied > 0
+      ? `You've now paid ${usd(r.unapplied)} more than the new price — our admissions team will be in touch about a refund.`
+      : r.added ? `Please pay the ${usd(r.added.amount)} by ${longDate(r.added.due)} — you can pay by card or bank account with the button below.`
+        : upcoming.some((p) => !p.manual) ? "Automatic payments will be charged at the new amounts." : "";
+    await familyEmail(app, schema, "scheduleUpdated", { from: usd(base), to: usd(amount), schedule, balanceLine: balanceLine(enrolment.schedule), changeNote }, { log });
+  } catch (err) { log.error?.("[payments reprice email]", err.message); }
+  if (r.unapplied > 0 && alertOn()) {
+    try { await sendAdmissionsAlert(app, "Overpaid after a price change", [`The deal's amount was changed from ${usd(base)} to ${usd(amount)}, but they've already paid ${usd(r.unapplied)} more than the new price. Please refund the difference (Stripe or Wise) and log it.`]); }
+    catch (err) { log.error?.("[payments reprice alert]", err.message); }
+  }
+  return { enrolment, change };
+}
+
 /** "Pay in full and save $500, or in two instalments and save $250" (offer savings, for the emails). */
 export function savingsText(sv) {
   if (!sv) return "";
@@ -509,6 +592,12 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
         continue;
       }
       if (e.deposit?.status !== "paid") continue;
+      // Admissions changed the price on the deal → the remaining payments follow it first.
+      const deal = await dealPaid(app);
+      if (deal?.amount) {
+        const rc = await reconcileDealAmount(app, e, schema, { dealAmount: deal.amount, now, log });
+        if (rc?.change) { out.actions.push({ id: app.id, repriced: rc.change.delta }); continue; }
+      }
       // One thing per application per run, in schedule order.
       let acted = false;
       for (let i = 0; i < (e.schedule || []).length; i++) {
@@ -889,8 +978,11 @@ export async function markPaidOutside(appId, idx, { by = "admissions", reference
 async function payOffDealAmount(app, e, discount, log = console) {
   const tuition = Number(e.offer?.tuition) || 0;
   if (!hubspotOn() || !app.hubspot_deal_id || !tuition) return;
-  try { await HS.updateDeal(app.hubspot_deal_id, { amount: String(Math.round((tuition - (Number(e.deposit?.discount) || 0) - discount) * 100) / 100) }); }
-  catch (err) { log.error?.("[payments payoff deal]", err.message); }
+  const amount = Math.round((tuition - (Number(e.deposit?.discount) || 0) - discount) * 100) / 100;
+  try {
+    await HS.updateDeal(app.hubspot_deal_id, { amount: String(amount) });
+    await patchEnrolment(app.id, { dealAmount: amount }); // our own change, not a price change
+  } catch (err) { log.error?.("[payments payoff deal]", err.message); }
 }
 
 /** The application behind a HubSpot deal, if `email` is the student or a parent on it. */

@@ -10,7 +10,7 @@ import { totalPaidForDeal, parseDealPayments } from "./deal-payments.mjs";
 const TTL_MS = 60 * 1000;
 const cache = new Map();
 
-/** { total, entries } from the deal, or null (no deal / HubSpot off / unreachable). Never throws. */
+/** { total, entries, amount } from the deal (amount = the deal's price for this student), or null (no deal / HubSpot off / unreachable). Never throws. */
 export async function dealPaid(app, { fresh = false } = {}) {
   const id = app?.hubspot_deal_id;
   if (!id || !hubspotOn()) return null;
@@ -21,7 +21,8 @@ export async function dealPaid(app, { fresh = false } = {}) {
     const props = deal?.properties || {};
     const entries = parseDealPayments(props);
     const { totalPaid } = totalPaidForDeal(props, entries);
-    const value = { total: totalPaid, entries: entries.map((e) => ({ index: e.index, amount: e.amount, reference: e.reference, date: e.dateIso })) };
+    const amount = Number(props.amount);
+    const value = { total: totalPaid, amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null, entries: entries.map((e) => ({ index: e.index, amount: e.amount, reference: e.reference, date: e.dateIso })) };
     cache.set(id, { at: Date.now(), value });
     return value;
   } catch (err) {

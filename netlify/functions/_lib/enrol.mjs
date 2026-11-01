@@ -65,12 +65,14 @@ export async function programDates(app) {
  * reason) when there's no price or no start date to build a schedule from.
  */
 export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}) {
-  const tuition = Number(app.deal_amount) || Number(K.programByName(schema, app.program)?.price) || 0;
+  // The student's price is the amount on their HubSpot deal (it can differ from the list price).
+  const deal = await dealPaid(app, { fresh: true });
+  const tuition = Number(deal?.amount) || Number(app.deal_amount) || Number(K.programByName(schema, app.program)?.price) || 0;
   if (!tuition) throw bad(`No program price for ${app.program} — set it in Programs & dates first.`, 409);
   const dates = await programDates(app);
   if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — the HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
-  const paid = paidSoFar(app, {}, (await dealPaid(app, { fresh: true }))?.total);
+  const paid = paidSoFar(app, {}, deal?.total);
   return {
     tuition, paid, deposit: P.depositFor(paid), discounts: planDiscounts(schema, app),
     start: dates.start, end: dates.end, programRecordId: dates.recordId,
@@ -166,7 +168,7 @@ export function acceptLink(token) {
 }
 
 /** What the acceptance page shows. Pure apart from `now`. */
-export function offerView(app, { enrolment = {}, decision = null, dealTotal = null } = {}, schema, terms, now = new Date()) {
+export function offerView(app, { enrolment = {}, decision = null, dealTotal = null, dealAmount = null } = {}, schema, terms, now = new Date()) {
   const base = {
     firstName: app.answers?.preferredName || app.first_name || "",
     name: `${app.first_name || ""} ${app.last_name || ""}`.trim(),
@@ -203,7 +205,8 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
   // deal. Once the deposit is in they only choose how to pay the rest.
   const paidNow = paidSoFar(app, enrolment, dealTotal);
   const prepaid = paidNow >= P.DEPOSIT_TOTAL ? paidNow : 0;
-  const o = { ...enrolment.offer, paid: paidNow, deposit: P.depositFor(paidNow) };
+  // Until the deposit is in, the price follows the HubSpot deal (admissions may change it after acceptance).
+  const o = { ...enrolment.offer, ...(Number(dealAmount) > 0 ? { tuition: Number(dealAmount) } : {}), paid: paidNow, deposit: P.depositFor(paidNow) };
   const holdUntil = decision.holdUntil || o.holdUntil;
   const expired = !prepaid && holdUntil && new Date(holdUntil) < now;
   // Discounts: what they were offered at acceptance, or today's settings if
@@ -236,8 +239,13 @@ const PLAN_LABEL = { monthly: "Monthly payments", two: "Two instalments", full: 
 export async function startCheckout(app, { plan, method, agree, token }, schema, now = new Date()) {
   const { enrolment, decision } = await readEnrolment(app.id);
   const terms = await publishedTermsOrNull();
-  const dealTotal = (await dealPaid(app, { fresh: true }))?.total ?? null;
-  const view = offerView(app, { enrolment, decision, dealTotal }, schema, terms, now);
+  const deal = await dealPaid(app, { fresh: true });
+  const view = offerView(app, { enrolment, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
+  // Keep the stored offer's price in step with the deal (what the plan and the discount maths use).
+  if (view.tuition && enrolment.offer && Number(enrolment.offer.tuition) !== view.tuition) {
+    enrolment.offer = { ...enrolment.offer, tuition: view.tuition, priceFromDealAt: now.toISOString() };
+    await patchEnrolment(app.id, { offer: enrolment.offer });
+  }
   if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
   if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
   if (view.state !== "offer") throw bad("There's no offer to confirm on this application.", 409);
@@ -352,6 +360,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
 
   // ── confirmed: HubSpot, the family, admissions ─────────────────────────
   const emails = { ...(enrolment.emails || {}) };
+  let dealAmount = null; // what the deal's amount is after this (the baseline for later price changes)
   if (hubspotOn() && app.hubspot_deal_id) {
     try {
       const deal = await HS.getDeal(app.hubspot_deal_id);
@@ -368,6 +377,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
       // so the portal (and reporting) don't show the discount as still due.
       if (deposit.discount && enrolment.offer?.tuition) props.amount = String(Math.round((enrolment.offer.tuition - deposit.discount) * 100) / 100);
       if (Object.keys(props).length) await HS.updateDeal(app.hubspot_deal_id, props);
+      dealAmount = Number(props.amount ?? deal?.properties?.amount) || null;
       const plan = PLAN_LABEL[choice.plan];
       const rows = schedule.filter((p) => p.kind !== "deposit").map((p) => `<li>${esc(p.due)} — $${p.amount.toFixed(2)}${p.manual ? " (to pay by this date)" : " (automatic)"}</li>`).join("");
       await HS.addNote(`<p><strong>${deposit.outside ? "Payment plan chosen" : "Place confirmed"}</strong> — ${deposit.outside ? `deposit of $${deposit.amount.toFixed(2)} paid outside Stripe (${esc(deposit.reference)})${deposit.todayAmount ? `; $${Number(deposit.todayAmount).toFixed(2)} paid today` : ""}${paymentMethod ? `; ${method === "ach" ? "bank account" : "card"} saved for automatic payments` : ""}` : `paid $${deposit.total.toFixed(2)} by ${choice.method === "ach" ? "bank account" : "card"} (${esc(deposit.reference)})`}. Plan: ${esc(plan)}${deposit.discount ? ` with the $${deposit.discount.toLocaleString("en-US")} ${choice.plan === "two" ? "two-instalment (off the final payment)" : "pay-in-full"} discount (deal amount set to $${(enrolment.offer.tuition - deposit.discount).toLocaleString("en-US")})` : ""}. Terms v${esc(choice.termsVersion || "?")} agreed ${esc(choice.agreedAt)}.</p>${rows ? `<ul>${rows}</ul>` : ""}`,
@@ -383,7 +393,7 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
     } catch (err) { log.error?.("[enrol email]", err.message); emails.enrolled = { error: String(err.message).slice(0, 300) }; }
   }
   if (alertOn()) { try { await sendDepositAlert(app, now); } catch (err) { log.error?.("[enrol alert]", err.message); } }
-  await patchEnrolment(app.id, { emails, ...(patch.hubspot ? { hubspot: patch.hubspot } : {}) });
+  await patchEnrolment(app.id, { emails, ...(patch.hubspot ? { hubspot: patch.hubspot } : {}), ...(dealAmount ? { dealAmount } : {}) });
   return { first: true, enrolment: { ...now, emails } };
 }
 
@@ -417,8 +427,13 @@ export async function depositFailed(session, schema, { log = console } = {}) {
 export async function startWire(app, { plan, agree, token }, schema, now = new Date(), { log = console } = {}) {
   const { enrolment, decision } = await readEnrolment(app.id);
   const terms = await publishedTermsOrNull();
-  const dealTotal = (await dealPaid(app, { fresh: true }))?.total ?? null;
-  const view = offerView(app, { enrolment, decision, dealTotal }, schema, terms, now);
+  const deal = await dealPaid(app, { fresh: true });
+  const view = offerView(app, { enrolment, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
+  // Keep the stored offer's price in step with the deal (what the plan and the discount maths use).
+  if (view.tuition && enrolment.offer && Number(enrolment.offer.tuition) !== view.tuition) {
+    enrolment.offer = { ...enrolment.offer, tuition: view.tuition, priceFromDealAt: now.toISOString() };
+    await patchEnrolment(app.id, { offer: enrolment.offer });
+  }
   if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
   if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
   if (view.state !== "offer" || !view.wire) throw bad("Bank transfer isn't available for this offer.", 409);
