@@ -164,6 +164,11 @@ export function fakeUpstreams({ pdOptions } = {}) {
         const rec = crm.programs.find((r) => r.id === m[1]);
         return rec ? J(rec) : J({ message: 'not found' }, 404);
       }
+      if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/([^/]+)\/([^/]+)$/.exec(p)) && method === 'DELETE') {
+        const [, from, fromId, to, toId] = m;
+        crm.assocLog = crm.assocLog.filter((a) => !((a.from === from && a.fromId === fromId && a.to === to && a.toId === toId) || (a.from === to && a.fromId === toId && a.to === from && a.toId === fromId)));
+        return new Response(null, { status: 204 });
+      }
       if ((m = /^\/crm\/v4\/objects\/([^/]+)\/([^/]+)\/associations\/(default\/)?([^/]+)\/([^/]+)$/.exec(p)) && method === 'PUT') {
         const [, from, fromId, dflt, to, toId] = m;
         const types = dflt ? [null] : b.map((t) => t.associationTypeId);

@@ -168,6 +168,9 @@ export async function markPaid(appId, payment) {
   return { app: await byId(appId), first: false };
 }
 
+/** Merge keys into applications.sync (undefined removes a key). */
+export async function setSyncPatch(id, patch) { return setSync(id, patch); }
+
 async function setSync(id, patch, cols = {}) {
   // Keys set to undefined are removed (e.g. clearing an old error).
   const remove = Object.keys(patch).filter((k) => patch[k] === undefined);

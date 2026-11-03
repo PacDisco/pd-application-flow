@@ -198,6 +198,14 @@ export async function getDeal(id) {
   return hs(`/crm/v3/objects/deals/${id}?properties=${DEAL_PROPS.join(",")}`);
 }
 
+/** Several deals at once (up to 100). */
+export async function getDeals(ids) {
+  const list = [...new Set((ids || []).map(String))].slice(0, 100);
+  if (!list.length) return [];
+  const data = await hs("/crm/v3/objects/deals/batch/read", { method: "POST", body: { properties: DEAL_PROPS, inputs: list.map((id) => ({ id })) } });
+  return data?.results || [];
+}
+
 export async function contactDeals(contactId) {
   const assoc = await hs(`/crm/v4/objects/contacts/${contactId}/associations/deals?limit=100`);
   const ids = (assoc?.results || []).map((r) => String(r.toObjectId));
@@ -321,6 +329,11 @@ export async function associate(fromType, fromId, toType, toId, type = null) {
       body: [{ associationCategory: type.category || "USER_DEFINED", associationTypeId: Number(type.typeId) }],
     });
   }
+}
+
+/** Remove every association (all labels) between two records. */
+export async function unassociate(fromType, fromId, toType, toId) {
+  await hs(`/crm/v4/objects/${fromType}/${fromId}/associations/${toType}/${toId}`, { method: "DELETE" });
 }
 
 let _programs = null;

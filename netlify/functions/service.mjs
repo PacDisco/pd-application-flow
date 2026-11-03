@@ -29,6 +29,7 @@ import { decide, extendHold, resendAcceptance } from "./_lib/decisions.mjs";
 import * as PAY from "./_lib/payments.mjs";
 import * as IMP from "./_lib/import.mjs";
 import { dealPaid } from "./_lib/deal-paid.mjs";
+import { syncFromDeals } from "./_lib/deal-sync.mjs";
 
 export const config = { path: ["/api/service/*"] };
 
@@ -81,8 +82,10 @@ export default async (req) => {
       // A manual retry clears recorded errors so failed targets run again.
       await db()`UPDATE applications SET sync_lock = NULL,
         sync = sync - 'hsError' - 'hsPaidError' - 'hsInterviewError' WHERE id = ${id}`;
+      // Program / season switched on the HubSpot deal → the application follows.
+      const fromDeal = await syncFromDeals({ schema, ids: [id] }).catch((err) => ({ error: err.message }));
       const result = await A.syncApplication(id, { schema });
-      return json({ ok: true, result, app: await A.byId(id) });
+      return json({ ok: true, result, fromDeal, app: await A.byId(id) });
     }
     if (req.method === "POST" && route === "resend-acceptance") {
       const b = await req.json();
