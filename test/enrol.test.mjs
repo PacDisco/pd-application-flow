@@ -164,16 +164,15 @@ await t('bank payment bounces → back to the offer to pay again; HubSpot note',
   assert.equal((await checkout({ token, plan: 'monthly', method: 'card', agree: true })).status, 200, 'can pay again');
 });
 
-await t('hold passed → page says so and checkout is refused until admissions extends it', async () => {
+await t('the acceptance never expires: weeks later they can still confirm and pay (only the discounts end)', async () => {
   const { id, token } = await acceptedApp('late@x.org');
-  await pool.query(`UPDATE applications SET decision = jsonb_set(decision, '{holdUntil}', to_jsonb((now() - interval '1 day')::text)),
-    enrolment = jsonb_set(enrolment, '{offer,holdUntil}', to_jsonb((now() - interval '1 day')::text)) WHERE id = $1`, [id]);
-  assert.equal((await offer(token)).body.offer.state, 'expired');
+  await pool.query(`UPDATE applications SET decision = jsonb_set(decision, '{holdUntil}', to_jsonb((now() - interval '20 days')::text)),
+    enrolment = jsonb_set(jsonb_set(enrolment, '{offer,holdUntil}', to_jsonb((now() - interval '20 days')::text)), '{offer,discountUntil}', to_jsonb((now() - interval '20 days')::text)) WHERE id = $1`, [id]);
+  const o = (await offer(token)).body.offer;
+  assert.equal(o.state, 'offer');
+  assert.ok(o.options.every((x) => !x.discount), 'no discounts');
   const r = await checkout({ token, plan: 'monthly', method: 'card', agree: true });
-  assert.equal(r.status, 409); assert.match(r.body.error, /extend/);
-  const { extendHold } = await import('../netlify/functions/_lib/decisions.mjs');
-  await extendHold(id, { days: 7, by: 'Megan' });
-  assert.equal((await offer(token)).body.offer.state, 'offer');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
 });
 
 await t('declined after acceptance → the page shows no offer', async () => {
@@ -215,7 +214,9 @@ await t('pay-in-full discount (semester $500): fixed at acceptance, charged on "
   schema.settings.payInFull = { enabled: true, semester: 500, mini: 250, summer: 0 };
   const { id, token, deal } = await acceptedApp('payfull@x.org');
   delete schema.settings.payInFull;
-  assert.match(mails.at(-1).text, /Pay in full and save \$500 — these savings are only available until July 10, 2027\./);
+  const untilDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Denver', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.now() + 7 * 864e5 - 1));
+  const untilText = new Date(`${untilDay}T12:00:00Z`).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  assert.ok(mails.at(-1).text.includes(`Pay in full and save $500 — these savings are only available until ${untilText}.`), mails.at(-1).text);
   const o = (await offer(token)).body.offer;
   const full = o.options.find((x) => x.key === 'full');
   assert.equal(full.discount, 500); assert.equal(full.payments[0].amount, 15250 - 500);
@@ -435,15 +436,70 @@ await t('wire deposit → "balance later" → balance by wire: details on the pa
   await PAY.runPayments({ schema, now: new Date(`${new Date(new Date(`${e.schedule[1].due}T12:00:00Z`).getTime() - 14 * 864e5).toISOString().slice(0, 10)}T18:00:00Z`), log: quiet });
   const rem = mails.slice(before).find((m) => /balance/i.test(m.subject));
   assert.ok(rem, 'reminder sent');
-  assert.match(rem.text, /216617201640/); assert.match(rem.text, /Send \$12,500/); assert.match(rem.text, /Sam Lee - Pacific Discovery/);
+  assert.match(rem.text, /216617201640/); assert.match(rem.text, /Send \$13,000/, "the window has passed by May: full balance"); assert.match(rem.text, /Sam Lee - Pacific Discovery/);
   // the wire arrives; admissions marks it paid before the cutoff → saving applied, deal reduced
-  assert.equal(o.payOff.until, e.schedule[1].due, 'by the balance due date');
-  const item = await PAY.markPaidOutside(id, 1, { by: 'Megan', reference: 'Wise 2' }, schema, { now: new Date('2027-06-01T18:00:00Z'), log: quiet });
+  assert.ok(o.payOff.until < e.schedule[1].due, 'by the end of the discount window');
+  const item = await PAY.markPaidOutside(id, 1, { by: 'Megan', reference: 'Wise 2' }, schema, { now: new Date(), log: quiet });
   assert.equal(item.amount, 12500);
   assert.equal(item.payOffDiscount, 500);
   assert.equal((await enrolment(id)).payOff.discount, 500);
   assert.equal(up.crm.deals.get(deal).properties.amount, '15000');
   assert.equal((await offer(token)).body.offer.rest, 0);
+});
+
+await t('discounts last 7 days after acceptance; admissions can extend them; scholarship students see none', async () => {
+  const service = (await import('../netlify/functions/service.mjs')).default;
+  const svc = async (route, body) => {
+    const res = await service(new Request(`https://apply.example.org/api/service/${route}`, { method: 'POST', headers: { 'x-apply-key': 'svc', 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    return { status: res.status, body: await res.json() };
+  };
+  schema.settings.discounts = { enabled: true, full: { semester: 500 }, two: { semester: 250 } };
+  const pub = (await pool.query(`SELECT published FROM apply_forms LIMIT 1`)).rows[0].published;
+  pub.settings = { ...(pub.settings || {}), discounts: schema.settings.discounts };
+  await pool.query(`UPDATE apply_forms SET published = $1`, [JSON.stringify(pub)]);
+  const db = await import('../netlify/functions/_lib/db.mjs'); db.__clearSchemaCache?.();
+  try {
+    const { id, token } = await acceptedApp('window@x.org');
+    let e = await enrolment(id);
+    const days = (Date.parse(e.offer.discountUntil) - Date.parse(e.offer.at)) / 864e5;
+    assert.equal(Math.round(days), 7, 'window stored at acceptance');
+    assert.equal((await offer(token)).body.offer.options.find((x) => x.key === 'full').discount, 500);
+    // 8 days later (simulated): gone
+    await pool.query(`UPDATE applications SET enrolment = jsonb_set(enrolment, '{offer,discountUntil}', to_jsonb($2::text)) WHERE id = $1`, [id, new Date(Date.now() - 3600e3).toISOString()]);
+    let o = (await offer(token)).body.offer;
+    assert.equal(o.options.find((x) => x.key === 'full').discount, undefined, 'window passed');
+    assert.equal(o.options.find((x) => x.key === 'two').discount, undefined);
+    // admissions extends
+    const r = await svc('extend-discounts', { id, days: 5, by: 'Megan' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    o = (await offer(token)).body.offer;
+    assert.equal(o.options.find((x) => x.key === 'full').discount, 500, 'back after extending');
+    e = await enrolment(id);
+    assert.equal(e.offer.discountsExtended.length, 1);
+    // scholarship: none, even within the window
+    assert.equal((await svc('scholarship', { id, on: true, by: 'Megan' })).status, 200);
+    o = (await offer(token)).body.offer;
+    assert.ok(o.options.every((x) => !x.discount), 'scholarship: no discounts');
+    assert.equal((await svc('extend-discounts', { id, days: 5 })).status, 409);
+    assert.equal((await svc('scholarship', { id, on: false })).status, 200);
+    assert.equal((await offer(token)).body.offer.options.find((x) => x.key === 'full').discount, 500);
+    // marked before accepting → the acceptance email doesn't mention savings either
+    const deal = String(deals++);
+    up.crm.deals.set(deal, { id: deal, properties: { pipeline: '74958084', dealstage: 'f9i' } });
+    const [{ id: id2 }] = (await pool.query(
+      `INSERT INTO applications (token_hash, email, first_name, last_name, program, term, status, answers, step1_at, step2_at, interview_at, paid_at, payment, hubspot_contact_id, hubspot_deal_id, sync)
+       VALUES ('h-sch', 'sch@x.org', 'Sam', 'Lee', 'South America Gap Semester', 'Fall 2027', 'paid', '{"preferredName":"Sam"}', now(), now(), now(), now(), '{"reference":"pi_fee","base":250}', '501', $1, '{"hsProgram":{"record":{"id":"P5"}}}') RETURNING id`, [deal])).rows;
+    await svc('scholarship', { id: id2, on: true, by: 'Megan' });
+    await decide(id2, { outcome: 'accepted', by: 'Megan' }, { schema, log: quiet });
+    assert.doesNotMatch(mails.at(-1).text, /save \$/);
+    const tok2 = /\/accept\?token=([\w-]+)/.exec(mails.at(-1).text)[1];
+    assert.ok((await offer(tok2)).body.offer.options.every((x) => !x.discount));
+  } finally {
+    delete schema.settings.discounts;
+    delete pub.settings.discounts;
+    await pool.query(`UPDATE apply_forms SET published = $1`, [JSON.stringify(pub)]);
+    db.__clearSchemaCache?.();
+  }
 });
 
 up.restore();

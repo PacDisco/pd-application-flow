@@ -99,8 +99,8 @@ function render() {
     <p class="small" style="margin:0 0 6px">${esc(o.program)}${o.term ? ` · ${esc(o.term)}` : ''}</p>
     <h1 class="serif">${pre ? `Choose your payment plan${o.firstName ? `, ${esc(o.firstName)}` : ''}` : `Congratulations${o.firstName ? `, ${esc(o.firstName)}` : ''}!`}</h1>
     ${pre ? `<p class="lead">We've received your deposit, so your place on <strong>${esc(o.program)}</strong> (starting ${esc(dateL(o.start))}) is held. Choose how you'd like to pay the rest of your tuition.</p>` : `<p class="lead">You've been accepted to <strong>${esc(o.program)}</strong>, starting ${esc(dateL(o.start))}. ${o.options.length === 1 && o.options[0].key === 'full'
-      ? `As your program starts in less than ${o.daysToStart < 75 ? '75' : '90'} days, please pay your tuition balance by <strong>${esc(dateL(o.holdUntil))}</strong> to confirm your place.`
-      : `Confirm your place by paying your ${money(o.deposit)} deposit by <strong>${esc(dateL(o.holdUntil))}</strong>.`}</p>`}
+      ? `As your program starts in less than ${o.daysToStart < 75 ? '75' : '90'} days, please pay your tuition balance to confirm your place.`
+      : `Confirm your place by paying your ${money(o.deposit)} deposit.`}${o.discountsUntil ? ` Choose by <strong>${esc(dateL(o.discountsUntil))}</strong> to get the savings below.` : ''}</p>`}
     <table class="sum" aria-label="Your tuition">
       <tr><td>Program tuition</td><td>${money(o.tuition)}</td></tr>
       ${pre
@@ -135,7 +135,7 @@ function render() {
       <p style="margin:0 0 8px">Send <strong>${money(charge.base)}</strong> in US dollars to:</p>
       <table class="sum">${o.wire.lines.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}
         <tr><td>Payment reference</td><td><strong>${esc(o.wire.reference)}</strong></td></tr></table>
-      <p class="small" style="margin:8px 0 0">${esc(o.wire.note)} We hold your place until ${esc(dateL(o.holdUntil))} and confirm it by email once the transfer arrives.${instal(sel) ? ' We\'ll then ask you to save a card or bank account for the later payments.' : ''}</p>
+      <p class="small" style="margin:8px 0 0">${esc(o.wire.note)} We'll confirm your place by email once the transfer arrives.${instal(sel) ? ' We\'ll then ask you to save a card or bank account for the later payments.' : ''}</p>
     </div>` : `<table class="sum" aria-label="Today">
       ${sel.discount && sel.key === 'full' ? `<tr><td>Tuition balance</td><td>${money(sel.fullPrice)}</td></tr><tr><td>Pay-in-full discount</td><td>−${money(sel.discount)}</td></tr>` : `<tr><td>${sel.key === 'full' ? 'Tuition balance' : sel.payments[0].amount > o.deposit ? 'Deposit + first instalment' : 'Deposit'}</td><td>${money(charge.base)}</td></tr>`}
       ${charge.fee ? `<tr><td>${S.method === 'ach' ? 'Bank payment fee' : 'Card processing fee'} (${pct(o.rates[S.method])})</td><td>${money(charge.fee)}</td></tr>` : ''}
@@ -144,7 +144,7 @@ function render() {
     ${charge.base <= 0 ? `<p class="small" style="margin:8px 0 0">${instal(sel) ? 'Nothing to pay today. You\'ll save your card or bank account for the automatic payments, and we email you 3 days before each one.' : 'Nothing to pay today.'}</p>` : ''}
     <label class="agree"><input type="checkbox" id="agree"${S.agree ? ' checked' : ''}><span>I agree to the ${o.terms ? `<a href="${esc(o.terms.url)}" target="_blank" rel="noopener">${esc(o.terms.title)}</a> (version ${esc(o.terms.version)})` : 'Program Terms & Conditions'}, including the payment and refund terms.</span></label>
     <div class="pay"><span class="small">${wire ? 'We\'ll email these details to you and your parents.' : 'Secure payment by Stripe. You\'ll come straight back here.'}</span>
-      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>${wire ? 'Email me the details and hold my place →' : charge.base > 0 ? `Pay ${money(charge.total)} and ${pre ? 'confirm my plan' : 'confirm my place'} →` : instal(sel) ? 'Save my payment details →' : 'Confirm my plan →'}</button></div>
+      <button class="btn btn--go" type="button" id="pay"${S.agree ? '' : ' disabled'}>${wire ? 'Email me the bank details →' : charge.base > 0 ? `Pay ${money(charge.total)} and ${pre ? 'confirm my plan' : 'confirm my place'} →` : instal(sel) ? 'Save my payment details →' : 'Confirm my plan →'}</button></div>
   </section>
   ${advisorCard(o)}`;
   document.querySelectorAll('input[name=plan]').forEach((el) => el.addEventListener('change', () => { S.plan = el.value; render(); }));

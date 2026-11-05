@@ -23,7 +23,8 @@ import * as HS from "./hubspot.mjs";
 import * as R from "./routing.mjs";
 import { refundPayment } from "./stripe.mjs";
 import { mailOn, sendDeclined, sendAccepted } from "./notify.mjs";
-import { makeOffer, patchEnrolment, acceptLink } from "./enrol.mjs";
+import { makeOffer, patchEnrolment, acceptLink, readEnrolment } from "./enrol.mjs";
+import * as P from "../../../public/plans-kit.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { holdDays, emailTemplate } from "../../../public/terms-kit.mjs";
@@ -148,7 +149,7 @@ async function carryOut(app, prev, { outcome, by, message, refund }, { schema, l
     try {
       const moved = await moveDeal(app, outcome, schema);
       const lines = outcome === "accepted"
-        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. Place held until ${esc(new Date(decision.holdUntil).toDateString())} for the $${Number(decision.offer.deposit).toLocaleString("en-US")} deposit${app.paid_at ? "" : " (application fee not paid, so it's included)"}. Tuition $${Number(decision.offer.tuition).toLocaleString("en-US")}, starts ${esc(decision.offer.start)}.${decision.email?.to ? " Acceptance email sent." : ""}</p>`]
+        ? [`<p><strong>Accepted</strong> by ${esc(decision.by)}. $${Number(decision.offer.deposit).toLocaleString("en-US")} deposit${app.paid_at ? "" : " (application fee not paid, so it's included)"}.${decision.offer.discountUntil ? ` Plan discounts until ${esc(new Date(decision.offer.discountUntil).toDateString())}.` : ""} Tuition $${Number(decision.offer.tuition).toLocaleString("en-US")}, starts ${esc(decision.offer.start)}.${decision.email?.to ? " Acceptance email sent." : ""}</p>`]
         : [`<p><strong>Not accepted</strong> — decided by ${esc(decision.by)}.</p>`,
           decision.refund ? `<p>Application fee refunded: $${(decision.refund.amount / 100).toFixed(2)} (Stripe ${esc(decision.refund.id)}).</p>` : "<p>Application fee not refunded.</p>"];
       if (note) lines.push(`<p>Message to the family: ${esc(note)}</p>`);
@@ -205,7 +206,7 @@ export async function resendAcceptance(appId, { by = "admissions" } = {}, { sche
   if (next.email.error) { await writeDecision(app.id, next); throw bad(`Email not sent: ${next.email.error}`, 502); }
   next.resent = [...(d.resent || []), { at: now.toISOString(), by: String(by).slice(0, 120) }];
   if (hubspotOn()) {
-    try { await HS.addNote(`<p><strong>Acceptance email sent</strong> by ${esc(by)} to ${esc(next.email.to.join(", "))}. Place held until ${esc(new Date(next.holdUntil).toDateString())}.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); }
+    try { await HS.addNote(`<p><strong>Acceptance email sent</strong> by ${esc(by)} to ${esc(next.email.to.join(", "))}. </p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); }
     catch (err) { log.error?.("[resend note]", err.message); }
   }
   await writeDecision(app.id, next);
@@ -224,6 +225,43 @@ export async function extendHold(appId, { days = 7, by = "admissions" } = {}, { 
   const holdUntil = new Date(Math.max(current, now.getTime() + n * 864e5)).toISOString();
   const next = { ...d, holdUntil, offer: d.offer ? { ...d.offer, holdUntil } : d.offer, extended: [...(d.extended || []), { at: now.toISOString(), by, holdUntil }] };
   await writeDecision(app.id, next);
-  if (d.offer) await patchEnrolment(app.id, { offer: next.offer });
+  // Only the hold changes on the stored offer (it may have the deal's price, new dates or extended discounts).
+  const { enrolment: e } = await readEnrolment(app.id);
+  if (e?.offer) await patchEnrolment(app.id, { offer: { ...e.offer, holdUntil } });
+  else if (d.offer) await patchEnrolment(app.id, { offer: next.offer });
   return next;
+}
+
+/** Admissions: give one family longer to take the plan discounts (n days from today; never shorter). */
+export async function extendDiscounts(appId, { days = 7, by = "admissions" } = {}, { schema = null, now = new Date() } = {}) {
+  const app = await A.byId(appId);
+  if (!app) throw bad("Application not found.", 404);
+  const d = await readDecision(app.id);
+  const { enrolment: e } = await readEnrolment(app.id);
+  if (d?.outcome !== "accepted" || !e?.offer) throw bad("Only an accepted application has discounts to extend.", 409);
+  if (["paid", "processing"].includes(e.deposit?.status) && e.choice?.plan !== "later") throw bad("They've already chosen their payment plan.", 409);
+  if (e.scholarship) throw bad("This student is marked as a scholarship student, so no discounts are offered.", 409);
+  const n = Math.max(1, Math.min(60, Math.round(Number(days) || 7)));
+  const current = Date.parse(P.discountWindowEnd(e.offer, P.discountDays(schema)) || "") || 0;
+  const discountUntil = new Date(Math.max(current, now.getTime() + n * 864e5)).toISOString();
+  const offer = { ...e.offer, discountUntil, discountsExtended: [...(e.offer.discountsExtended || []), { at: now.toISOString(), by, discountUntil }] };
+  await patchEnrolment(app.id, { offer });
+  if (hubspotOn() && (app.hubspot_contact_id || app.hubspot_deal_id)) {
+    try { await HS.addNote(`<p><strong>Plan discounts extended</strong> by ${esc(by)} until ${esc(new Date(discountUntil).toDateString())}.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); } catch { /* best-effort */ }
+  }
+  return { discountUntil, discountsUntilDay: P.discountsUntilDay(offer, P.discountDays(schema), process.env.INTERVIEW_TZ || "America/Denver") };
+}
+
+/** Admissions: mark / unmark a scholarship student (no plan discounts on their acceptance page or emails). */
+export async function setScholarship(appId, on, { by = "admissions" } = {}) {
+  const app = await A.byId(appId);
+  if (!app) throw bad("Application not found.", 404);
+  const { enrolment: e } = await readEnrolment(app.id);
+  if (on && ["paid", "processing"].includes(e?.deposit?.status) && e?.deposit?.discount) throw bad("They've already paid with a plan discount — adjust the deal amount in HubSpot instead.", 409);
+  if (on) await patchEnrolment(app.id, { scholarship: { at: new Date().toISOString(), by: String(by).slice(0, 120) } });
+  else await db().query(`UPDATE applications SET enrolment = enrolment - 'scholarship', updated_at = now() WHERE id = $1`, [app.id]);
+  if (hubspotOn() && (app.hubspot_contact_id || app.hubspot_deal_id)) {
+    try { await HS.addNote(`<p><strong>${on ? "Marked as a scholarship student" : "Scholarship mark removed"}</strong> by ${esc(by)} — plan discounts ${on ? "not offered" : "offered again"}.</p>`, { contactId: app.hubspot_contact_id, dealId: app.hubspot_deal_id }); } catch { /* best-effort */ }
+  }
+  return { scholarship: on ? { by } : null };
 }

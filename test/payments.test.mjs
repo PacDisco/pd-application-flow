@@ -125,6 +125,9 @@ await t('depositAction: reminders at 5, 2, 1 days left (per hold), then hold pas
   const ext = '2026-11-15T18:00:00Z';
   assert.deepEqual(PAY.depositAction({ ...after5, holdExpired: { holdUntil } }, { ...d, holdUntil: ext }, at('2026-11-10'), cfg), { action: 'remind', stage: 5, holdUntil: ext }, 'an extension starts the reminders again');
   assert.equal(PAY.depositAction(e, d, at('2026-11-03'), { ...cfg, depositReminders: false }).action, 'none');
+  // discounts extended by admissions → the reminders follow the new date
+  const disc = '2026-11-20T18:00:00Z';
+  assert.deepEqual(PAY.depositAction({ ...e, offer: { holdUntil, discountUntil: disc }, holdExpired: { holdUntil } }, d, at('2026-11-15'), cfg), { action: 'remind', stage: 5, holdUntil: disc });
 });
 
 // ── integration ────────────────────────────────────────────────────────────
@@ -309,7 +312,7 @@ await t('balance later: reminders 14 and 3 days before, payable from the page, o
   assert.match(mails.at(-1).text, /paid in full/);
 });
 
-await t('deposit reminders while the place is held; admissions told when the hold passes', async () => {
+await t('deposit reminders before the discounts end; admissions told once if still unpaid (the link keeps working)', async () => {
   const { id } = await accepted('remind@x.org');
   const { decision } = (await pool.query('SELECT decision FROM applications WHERE id = $1', [id])).rows[0];
   const hold = new Date(decision.holdUntil).getTime();
@@ -327,8 +330,9 @@ await t('deposit reminders while the place is held; admissions told when the hol
   await run(new Date(hold + 3600e3));
   await run(new Date(hold + 7200e3));
   assert.equal(mails.length, before + 1);
-  assert.match(mails.at(-1).subject, /hold passed: Sam Lee/);
-  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Hold passed/);
+  assert.match(mails.at(-1).subject, /Deposit not paid yet: Sam Lee/);
+  assert.match(mails.at(-1).text, /link still works/);
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /Deposit still not paid/);
 });
 
 await t('withdraw after the deposit: future payments cancelled, what was paid kept, deal → Cancelled, nothing charged after', async () => {
@@ -413,7 +417,7 @@ await t('student portal: accepted but no deposit yet → "offer" (confirm your p
   // no deposit reminders once it's been paid another way
   const before = mails.length;
   await run(new Date(Date.now() + 5.5 * 864e5));
-  assert.equal(mails.filter((m, i) => i >= before && m.to.includes('portaloffer')).length, 0);
+  assert.equal(mails.filter((m, i) => i >= before && m.to.includes('portaloffer') && !/Travel insurance/.test(m.subject)).length, 0, 'no deposit reminders (the day-5 insurance email still goes)');
 });
 
 await t('portalPlan: what the deal says is paid decides "offer" vs "choose"', () => {
@@ -444,26 +448,30 @@ await t('student portal: plan by deal for the student or a parent only; a fresh 
 // ── plan savings: pay off early + "savings end soon" emails ────────────────
 const DISC = { enabled: true, full: { semester: 500 }, two: { semester: 250 } };
 
-await t('savingsNow / discountAction (pure): offer savings until 61 days out; reminders 14 and 3 days before, once each', async () => {
+await t('savingsNow / discountAction (pure): savings last 7 days after acceptance (extendable, never past 61 days out); none for scholarship students', async () => {
   const sch = { ...schema, settings: { ...schema.settings, discounts: DISC } };
   const app = { program: 'South America Gap Semester', paid_at: '2026-10-01', payment: { base: 250 }, status: 'accepted' };
-  const e = { offer: { tuition: 15500, start: '2027-09-09', discounts: { full: 500, two: 250 }, holdUntil: '2027-12-01T00:00:00Z' } };
-  const d = { outcome: 'accepted', at: '2026-10-01T00:00:00Z' };
-  const sv = PAY.savingsNow(app, e, d, sch, at('2027-06-01'));
-  assert.deepEqual(sv, { kind: 'offer', full: 500, two: 250, until: '2027-07-10' });
+  const e = { offer: { tuition: 15500, start: '2027-09-09', discounts: { full: 500, two: 250 }, at: '2026-11-05T18:00:00Z', holdUntil: '2026-11-12T18:00:00Z' } };
+  const d = { outcome: 'accepted', at: '2026-11-05T18:00:00Z', holdUntil: '2026-11-12T18:00:00Z' };
+  const sv = PAY.savingsNow(app, e, d, sch, at('2026-11-06'));
+  assert.deepEqual(sv, { kind: 'offer', full: 500, two: 250, until: '2026-11-12' });
   assert.match(PAY.savingsText(sv), /^pay in full and save \$500(\.00)?, or pay in two instalments and save \$250(\.00)?$/);
-  assert.deepEqual(PAY.savingsNow(app, e, d, sch, at('2027-06-26')), { kind: 'offer', full: 500, two: 0, until: '2027-07-10' }, 'under 75 days: pay in full only, still discounted');
-  assert.equal(PAY.savingsNow(app, e, d, sch, at('2027-07-11')), null, 'gone 60 days out');
+  assert.equal(PAY.savingsNow(app, e, d, sch, at('2026-11-12', 19)), null, 'gone after 7 days');
+  assert.equal(PAY.savingsNow(app, { ...e, scholarship: { by: 'Megan' } }, d, sch, at('2026-11-06')), null, 'scholarship: none');
   const c = { ...cfg, discountReminders: true };
-  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-06-25'), c).action, 'none', '15 days before');
-  assert.deepEqual(PAY.discountAction(app, e, d, sch, at('2027-06-26'), c).stage, 14);
-  const sent = { ...e, discountReminded: { '2027-07-10|14': '2027-06-26T18:00:00Z' } };
-  assert.equal(PAY.discountAction(app, sent, d, sch, at('2027-06-27'), c).action, 'none');
-  assert.equal(PAY.discountAction(app, sent, d, sch, at('2027-07-07'), c).stage, 3);
-  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-07-11'), c).action, 'none', 'after the last day');
-  assert.equal(PAY.discountAction(app, e, d, sch, at('2027-06-26'), { ...c, discountReminders: false }).action, 'none', 'switched off');
-  // no discounts set → nothing to remind about
-  assert.equal(PAY.savingsNow(app, { ...e, offer: { ...e.offer, discounts: { full: 0, two: 0 } } }, d, schema, at('2027-06-01')), null);
+  assert.equal(PAY.discountAction(app, e, d, sch, at('2026-11-10'), c).reason, 'in the deposit reminders', 'ends with the hold → the deposit reminders say so');
+  // extended by admissions, deposit already in (choosing a plan): its own reminder 2 days before
+  const ext = { ...e, prepaid: { total: 2500 }, offer: { ...e.offer, discountUntil: '2026-11-30T18:00:00Z' } };
+  assert.equal(PAY.savingsNow(app, ext, d, sch, at('2026-11-20')).until, '2026-11-30');
+  assert.equal(PAY.discountAction(app, ext, d, sch, at('2026-11-27'), c).action, 'none', '3 days before');
+  assert.equal(PAY.discountAction(app, ext, d, sch, at('2026-11-28'), c).stage, 2);
+  const sent = { ...ext, discountReminded: { '2026-11-30|2': '2026-11-28T18:00:00Z' } };
+  assert.equal(PAY.discountAction(app, sent, d, sch, at('2026-11-29'), c).action, 'none', 'once');
+  assert.equal(PAY.discountAction(app, ext, d, sch, at('2026-11-28'), { ...c, discountReminders: false }).action, 'none', 'switched off');
+  // an extension never goes past 61 days before the start
+  const far = { ...ext, offer: { ...ext.offer, discountUntil: '2027-08-20T18:00:00Z' } };
+  assert.equal(PAY.savingsNow(app, far, d, sch, at('2027-06-01')).until, '2027-07-10');
+  assert.equal(PAY.savingsNow(app, far, d, sch, at('2027-07-11')), null);
 });
 
 await t('monthly or two instalments: choosing is final — no pay-in-full saving afterwards', async () => {
@@ -483,7 +491,8 @@ await t('balance later: paying the balance before the discounts end takes the pa
   const { id, token, deal } = await enrolled('payoff@x.org', 'later');
   delete schema.settings.discounts;
   const o = (await api(`offer?token=${token}`)).body.offer;
-  assert.deepEqual(o.payOff, { amount: 500, rest: 13000, pay: 12500, until: '2027-06-11' }, 'deadline = the balance due date (before the discount cutoff)');
+  const { discountsUntil } = await import('../netlify/functions/_lib/enrol.mjs');
+  assert.deepEqual(o.payOff, { amount: 500, rest: 13000, pay: 12500, until: discountsUntil((await enrolment(id)).offer, schema) }, 'deadline = the end of the 7-day discount window');
   const r = await api('pay-item', { token, index: 'rest', method: 'card' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const s = up.stripe.sessions.get(r.body.url.split('/').pop());
@@ -502,22 +511,19 @@ await t('balance later: paying the balance before the discounts end takes the pa
   assert.equal(o2.rest, 0); assert.equal(o2.payOff, null);
 });
 
-await t('balance later: the balance reminders (14 and 3 days before it is due) carry the saving; no separate "savings end" emails; overdue = no saving', async () => {
+await t('balance later: the saving ends with the 7-day discount window — later balance reminders do not offer it; no "savings end" emails', async () => {
   schema.settings.discounts = DISC;
-  const { token } = await enrolled('payoff2@x.org', 'later');
+  const { token, id } = await enrolled('payoff2@x.org', 'later');
   delete schema.settings.discounts;
+  const e = await enrolment(id);
+  const { payOffSaving } = await import('../netlify/functions/_lib/enrol.mjs');
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, new Date()).amount, 500, 'within the window');
+  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, new Date(Date.now() + 8 * 864e5)), null, 'after it');
   const runs = async (day) => { const before = mails.length; for (let i = 0; i < 4; i++) await run(at(day)); return mails.slice(before); };
   const rem = (await runs('2027-05-28')).filter((m) => m.to.includes('payoff2@x.org'));
   assert.equal(rem.length, 1, 'one email: the balance reminder');
-  assert.match(rem[0].subject, /balance/i);
-  assert.match(rem[0].text, /Pay it by June 11, 2027 and we'll take \$500 off/);
-  const rem3 = (await runs('2027-06-08')).filter((m) => m.to.includes('payoff2@x.org'));
-  assert.equal(rem3.length, 1); assert.match(rem3[0].text, /\$500 off/);
+  assert.doesNotMatch(rem[0].text, /take \$500 off/);
   assert.equal((await runs('2027-06-26')).filter((m) => /save/i.test(m.subject)).length, 0, 'no "savings end" email');
-  const { payOffSaving } = await import('../netlify/functions/_lib/enrol.mjs');
-  const e = await enrolment((await pool.query(`SELECT id FROM applications WHERE email = 'payoff2@x.org'`)).rows[0].id);
-  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-06-11')).amount, 500, 'due date');
-  assert.equal(payOffSaving({ program: 'South America Gap Semester' }, e, schema, at('2027-06-12')), null, 'overdue: no saving');
   assert.ok(token);
 });
 
@@ -603,6 +609,55 @@ await t('price change after paying in full: increase → a balance due in 14 day
   assert.equal(e.schedule.at(-1).status, 'cancelled');
   assert.equal(e.priceChanges.at(-1).unapplied, 500);
   assert.ok(mails.slice(m).some((x) => /Overpaid/.test(x.subject) && /admissions@/.test(x.to)));
+});
+
+// ── travel insurance ───────────────────────────────────────────────────────
+await t('insuranceAction (pure): day 5 to day 7 after the deposit, once; never late', async () => {
+  const paidAt = '2026-11-10T18:00:00Z';
+  const e = { deposit: { status: 'paid', paidAt } };
+  assert.equal(PAY.insuranceAction(e, new Date('2026-11-15T17:00:00Z')), null, 'not yet');
+  const a = PAY.insuranceAction(e, new Date('2026-11-15T19:00:00Z'));
+  assert.equal(a.cfarBy.toISOString(), '2026-11-17T18:00:00.000Z');
+  assert.equal(PAY.insuranceAction({ ...e, insuranceReminder: { at: 'x' } }, new Date('2026-11-16T00:00:00Z')), null, 'once');
+  assert.equal(PAY.insuranceAction(e, new Date('2026-11-18T00:00:00Z')), null, 'too late — skipped');
+  assert.ok(PAY.insuranceAction({ prepaid: { at: paidAt } }, new Date('2026-11-15T19:00:00Z')), 'deposit paid another way');
+  assert.equal(PAY.insuranceAction({ deposit: { status: 'processing', paidAt } }, new Date('2026-11-15T19:00:00Z')), null, 'bank payment still clearing');
+});
+
+await t('acceptance email has the insurance section (our requirement, World Nomads link, affiliate disclosure — no plan advice); day 5 after the deposit → CFAR reminder with the date', async () => {
+  const a = await accepted('ins@x.org');
+  const acc = mails.at(-1);
+  assert.match(acc.text, /Travel insurance/);
+  assert.match(acc.text, /Pacific Discovery requires every student to have travel insurance/);
+  assert.match(acc.text, /kqzyfj\.com\/click-101918016-17344096/);
+  assert.match(acc.text, /World Nomads affiliate and may receive a fee/);
+  assert.match(acc.text, /often just 7 days/);
+  assert.match(acc.text, /\$250,000 emergency medical and \$700,000 emergency evacuation/);
+  assert.doesNotMatch(acc.text, /Epic|Explorer|covers everything/, 'no plan recommendations or coverage claims');
+  assert.ok(acc.text.indexOf('Travel insurance') < acc.text.indexOf('Pacific Discovery Admissions'), 'before the sign-off');
+  const r = await api('checkout', { token: a.token, plan: 'monthly', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  const e = await enrolment(a.id);
+  const paid = new Date(e.deposit.paidAt).getTime();
+  let before = mails.length;
+  await run(new Date(paid + 4 * 864e5));
+  assert.ok(!mails.slice(before).some((m) => /Travel insurance/.test(m.subject)), 'not before day 5');
+  await run(new Date(paid + 5.1 * 864e5));
+  await run(new Date(paid + 5.3 * 864e5));
+  const ins = mails.slice(before).filter((m) => /Travel insurance/.test(m.subject));
+  assert.equal(ins.length, 1, 'once');
+  assert.match(ins[0].subject, /Cancel For Any Reason window closes \w+day/);
+  assert.match(ins[0].text, /which for you is \*?\*?\w+day, \w+ \d+/);
+  assert.match(ins[0].text, /World Nomads affiliate/);
+  assert.ok(ins[0].to.includes('parent.ins@x.org'), 'parents too');
+  const b = await accepted('ins2@x.org');
+  const N = await import('../netlify/functions/_lib/notify.mjs');
+  const app = (await pool.query('SELECT * FROM applications WHERE id = $1', [b.id])).rows[0];
+  // switched off in the dashboard → no section
+  const off = { ...schema, settings: { ...schema.settings, insurance: { enabled: false } } };
+  assert.doesNotMatch(N.acceptedContent(app, off, { offer: (await enrolment(b.id)).offer, link: 'https://x' }).text, /Travel insurance/);
 });
 
 up.restore();

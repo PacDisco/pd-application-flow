@@ -374,7 +374,7 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     const saves = [];
     if (keys.length > 1 && fullOpt?.discount) saves.push(`pay in full and save ${usd(fullOpt.discount)}`);
     if (twoOpt?.discount) saves.push(`pay in two instalments and save ${usd(twoOpt.discount)}`);
-    if (saves.length) howToPay += ` ${saves.join(", or ").replace(/^./, (c) => c.toUpperCase())} — these savings are only available until ${shortDate(P.discountLastDay(offer.start))}.`;
+    if (saves.length) howToPay += ` ${saves.join(", or ").replace(/^./, (c) => c.toUpperCase())} — these savings are only available until ${shortDate(P.discountsUntilDay(offer, P.discountDays(schema), process.env.INTERVIEW_TZ || "America/Denver"))}.`;
   }
   const vars = {
     firstName: app.answers?.preferredName || app.first_name || "there",
@@ -387,9 +387,16 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     tuition: usd(offer?.tuition ?? 0),
     howToPay,
     message: String(message || "").trim(),
+    insurance: TK.insuranceBlock(schema),
     link: link || "",
   };
-  const body = TK.fillTemplate(tpl.body, vars).replace(/\s*\(\s*\)/g, "").replace(/, starting \./, ".");
+  // An acceptance email edited in the dashboard before {insurance} existed still gets the section, before the sign-off.
+  let tplBody = tpl.body;
+  if (vars.insurance && !tplBody.includes("{insurance}")) {
+    const i = tplBody.lastIndexOf("\nPacific Discovery");
+    tplBody = i > 0 ? `${tplBody.slice(0, i)}\n{insurance}\n${tplBody.slice(i)}` : `${tplBody}\n\n{insurance}`;
+  }
+  const body = TK.fillTemplate(tplBody, vars).replace(/\s*\(\s*\)/g, "").replace(/, starting \./, ".").replace(/\n{3,}/g, "\n\n");
   const subject = TK.fillTemplate(tpl.subject, vars);
   const advisor = TK.advisorBlock(schema);
   return { subject, text: familyEmailText(body, terms, advisor), html: familyEmailHtml(body, terms, advisor), enabled: tpl.enabled };

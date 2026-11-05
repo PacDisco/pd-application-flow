@@ -25,7 +25,7 @@ import { serviceOk, json, errorResponse, fileUrl } from "./_lib/http.mjs";
 import * as K from "../../public/form-kit.mjs";
 import * as A from "./_lib/applications.mjs";
 import * as JF from "./_lib/jotform.mjs";
-import { decide, extendHold, resendAcceptance } from "./_lib/decisions.mjs";
+import { decide, extendHold, resendAcceptance, extendDiscounts, setScholarship } from "./_lib/decisions.mjs";
 import * as PAY from "./_lib/payments.mjs";
 import * as IMP from "./_lib/import.mjs";
 import { dealPaid } from "./_lib/deal-paid.mjs";
@@ -129,6 +129,14 @@ export default async (req) => {
       const b = await req.json();
       await PAY.setPaused(String(b.id || ""), !!b.paused, { by: b.by });
       return json({ ok: true });
+    }
+    if (req.method === "POST" && route === "extend-discounts") {
+      const b = await req.json();
+      return json({ ok: true, ...(await extendDiscounts(String(b.id || ""), { days: b.days, by: b.by }, { schema })) });
+    }
+    if (req.method === "POST" && route === "scholarship") {
+      const b = await req.json();
+      return json({ ok: true, ...(await setScholarship(String(b.id || ""), !!b.on, { by: b.by })) });
     }
     if (req.method === "POST" && route === "extend-hold") {
       const b = await req.json();

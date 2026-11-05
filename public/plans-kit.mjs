@@ -26,6 +26,27 @@ export const MONTHLY_MIN_DAYS = 90;
 export const TWO_MIN_DAYS = 75;
 /** Plan discounts (pay in full / two instalments) end this many days before the start. */
 export const DISCOUNT_END_DAYS = 60;
+/** Plan discounts are only offered for this many days after acceptance (dashboard setting; admissions can extend one family's). */
+export const DISCOUNT_WINDOW_DAYS = 7;
+export function discountDays(schema) {
+  const n = Number(schema?.settings?.discounts?.days);
+  return Number.isFinite(n) && n >= 1 && n <= 90 ? Math.round(n) : DISCOUNT_WINDOW_DAYS;
+}
+/** When this offer's discounts end (ISO moment): extended by admissions, else acceptance + the window. */
+export function discountWindowEnd(offer, days = DISCOUNT_WINDOW_DAYS) {
+  if (!offer) return null;
+  if (offer.discountUntil) return offer.discountUntil;
+  return offer.at ? new Date(new Date(offer.at).getTime() + days * 864e5).toISOString() : null;
+}
+/** The last day (YYYY-MM-DD, admissions' time zone) the offer's discounts can be taken: the window or 61 days out, whichever is first. */
+export function discountsUntilDay(offer, days = DISCOUNT_WINDOW_DAYS, tz = 'America/Denver') {
+  const last = offer?.start ? discountLastDay(offer.start) : null;
+  const w = discountWindowEnd(offer, days);
+  const wd = w ? new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(new Date(w).getTime() - 1)) : null;
+  if (!wd) return last;
+  if (!last) return wd;
+  return wd < last ? wd : last;
+}
 /** The last day plan discounts can be taken (YYYY-MM-DD): the day before the 60-day mark. */
 export const discountLastDay = (start) => iso(new Date(day(start).getTime() - (DISCOUNT_END_DAYS + 1) * 864e5));
 

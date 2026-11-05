@@ -31,7 +31,7 @@ import * as TK from "../../../public/terms-kit.mjs";
 import { chargeSaved, expireCheckout, createDepositCheckout, createSetupCheckout, getSetupIntent, getPaymentIntent, getCheckoutSession, customerFor } from "./stripe.mjs";
 import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } from "./notify.mjs";
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
-import { acceptLink, paidSoFar, payOffSaving, familyDiscounts, wireReference } from "./enrol.mjs";
+import { acceptLink, paidSoFar, payOffSaving, familyDiscounts, wireReference, discountsUntil } from "./enrol.mjs";
 import { dealPaid } from "./deal-paid.mjs";
 
 const DAY = 864e5;
@@ -47,8 +47,11 @@ export const MAX_ATTEMPTS = 3;
 export const BALANCE_REMIND_DAYS = [14, 3];
 /** Deposit reminders when this many days are left on the hold. */
 export const DEPOSIT_REMIND_LEFT = [5, 2, 1];
-/** Plan savings: reminders this many days before the last day they can be taken. */
-export const DISCOUNT_REMIND_DAYS = [14, 3];
+/** Plan savings: a reminder this many days before the last day they can be taken. */
+export const DISCOUNT_REMIND_DAYS = [2];
+/** Travel insurance reminder this many days after the deposit (Cancel For Any Reason must be added within 7). */
+export const INSURANCE_REMIND_DAY = 5;
+export const CFAR_DAYS = 7;
 /** Per run, so a mistake can't run away. */
 export const MAX_ACTIONS_PER_RUN = 40;
 const MIN_GAP_MS = 20 * 3600e3;
@@ -110,12 +113,16 @@ export function itemAction(item, e, now, cfg) {
   return { action: "none" };
 }
 
-/** Deposit not paid yet: reminder / hold passed. Pure (tested). */
+/**
+ * Deposit not paid yet: reminders before the plan discounts end (the 7-day
+ * window, or the date admissions extended it to), then admissions is told
+ * once that it's still unpaid. The acceptance itself never expires. Pure (tested).
+ */
 export function depositAction(e, decision, now, cfg) {
   if (!cfg.depositReminders || decision?.outcome !== "accepted" || !e?.offer) return { action: "none" };
   if (["paid", "processing"].includes(e.deposit?.status)) return { action: "none" };
   if (e.prepaid) return { action: "none", reason: "deposit paid another way" };
-  const holdUntil = decision.holdUntil || e.offer.holdUntil;
+  const holdUntil = e.offer.discountUntil || decision.holdUntil || e.offer.holdUntil;
   if (!holdUntil) return { action: "none" };
   const hold = new Date(holdUntil);
   if (now >= hold) return e.holdExpired?.holdUntil === holdUntil ? { action: "none" } : { action: "expired", holdUntil };
@@ -142,13 +149,11 @@ export function savingsNow(app, e, decision, schema, now = new Date()) {
     const po = e.deposit.status === "paid" ? payOffSaving(app, e, schema, now) : null;
     return po ? { kind: "payOff", ...po } : null;
   }
-  const holdUntil = decision.holdUntil || e.offer.holdUntil;
-  if (!e.prepaid && holdUntil && new Date(holdUntil) <= now) return null;
   const paid = paidSoFar(app, e);
-  const o = P.paymentOptions({ tuition: e.offer.tuition, paid, deposit: P.depositFor(paid), start: e.offer.start, today: P.iso(now), discounts: familyDiscounts(app, e, schema) });
+  const o = P.paymentOptions({ tuition: e.offer.tuition, paid, deposit: P.depositFor(paid), start: e.offer.start, today: P.iso(now), discounts: familyDiscounts(app, e, schema, now) });
   const full = o.options.find((x) => x.key === "full")?.discount || 0;
   const two = o.options.find((x) => x.key === "two")?.discount || 0;
-  return full || two ? { kind: "offer", full, two, until: P.discountLastDay(e.offer.start) } : null;
+  return full || two ? { kind: "offer", full, two, until: discountsUntil(e.offer, schema) } : null;
 }
 
 /** "Your savings end soon" — 14 and 3 days before the last day. Pure apart from `now` (tested). */
@@ -160,6 +165,8 @@ export function discountAction(app, e, decision, schema, now, cfg) {
   // On "balance later" the balance reminders (14 and 3 days before it's due) already carry the saving.
   if (sv.kind === "payOff") return { action: "none", reason: "in the balance reminders" };
   const today = localDay(now, cfg.tz);
+  // Deposit not paid yet: the deposit reminders (timed to the discount deadline) already say so.
+  if (!e.prepaid && cfg.depositReminders) return { action: "none", reason: "in the deposit reminders" };
   const left = Math.round((P.day(sv.until) - P.day(today)) / DAY);
   if (left < 0) return { action: "none" };
   const stage = [...DISCOUNT_REMIND_DAYS].sort((a, b) => a - b).find((d) => left <= d);
@@ -270,6 +277,39 @@ export function savingsText(sv) {
   if (sv.full) parts.push(`pay in full and save ${usd(sv.full)}`);
   if (sv.two) parts.push(`pay in two instalments and save ${usd(sv.two)}`);
   return parts.join(", or ");
+}
+
+/**
+ * Day 5 after the deposit: the travel insurance email (once). Only between day
+ * 5 and day 7 — a deposit paid before this existed doesn't get a late one. Pure (tested).
+ * → null | { paidAt, cfarBy (Date) }
+ */
+export function insuranceAction(e, now = new Date()) {
+  if (!e || e.withdrawn || e.insuranceReminder) return null;
+  const paidAt = (e.deposit?.status === "paid" && e.deposit.paidAt) || e.prepaid?.at || null;
+  if (!paidAt) return null;
+  const t = new Date(paidAt).getTime();
+  const days = (now.getTime() - t) / DAY;
+  if (days < INSURANCE_REMIND_DAY || days >= CFAR_DAYS) return null;
+  return { paidAt, cfarBy: new Date(t + CFAR_DAYS * DAY) };
+}
+
+async function insuranceReminder(app, act, schema, now, log) {
+  if (!TK.insuranceSettings(schema).enabled || !TK.emailTemplate(schema, "insuranceReminder").enabled) return null;
+  const rows = await db().query(
+    `UPDATE applications SET enrolment = enrolment || jsonb_build_object('insuranceReminder', jsonb_build_object('at', $2::text)), updated_at = now()
+      WHERE id = $1 AND NOT (enrolment ? 'insuranceReminder') RETURNING id`, [app.id, now.toISOString()]);
+  if (!rows.length) return { skipped: "taken" };
+  try {
+    const cfarBy = new Date(act.cfarBy).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
+    const email = await familyEmail(app, schema, "insuranceReminder", { cfarBy, insurance: TK.insuranceBlock(schema, { cfarBy }) }, { log });
+    if (!email.skipped) await patchEnrolment(app.id, { insuranceReminder: { at: now.toISOString(), to: email.to } });
+    return { insurance: true };
+  } catch (err) {
+    await db().query(`UPDATE applications SET enrolment = enrolment - 'insuranceReminder' WHERE id = $1`, [app.id]);
+    log.error?.("[payments insurance]", err.message);
+    return { error: err.message };
+  }
 }
 
 // ── atomic updates ─────────────────────────────────────────────────────────
@@ -552,9 +592,9 @@ async function holdExpired(app, e, act, now, log) {
     `UPDATE applications SET enrolment = enrolment || jsonb_build_object('holdExpired', jsonb_build_object('holdUntil', $2::text, 'at', $3::text)), updated_at = now()
       WHERE id = $1 AND COALESCE(enrolment->'holdExpired'->>'holdUntil', '') <> $2 RETURNING id`, [app.id, act.holdUntil, now.toISOString()]);
   if (!rows.length) return { skipped: "taken" };
-  await note(app, `<p><strong>Hold passed</strong> — no deposit by ${esc(new Date(act.holdUntil).toLocaleString("en-US", { timeZone: process.env.INTERVIEW_TZ || "America/Denver" }))}. Extend the hold in the dashboard if they still want the place.</p>`, log);
+  await note(app, `<p><strong>Deposit still not paid</strong> — the plan discounts ended ${esc(new Date(act.holdUntil).toLocaleString("en-US", { timeZone: process.env.INTERVIEW_TZ || "America/Denver" }))}. Their acceptance link still works.</p>`, log);
   if (alertOn()) {
-    try { await sendAdmissionsAlert(app, "Deposit not paid — hold passed", [e.wire ? `This applicant said they'd pay ${usd(e.wire.amount)} by bank transfer (reference "${e.wire.reference}"), but it hasn't been marked as received and the hold on their place has passed.` : "This applicant was accepted but hasn't paid the deposit, and the hold on their place has passed.", e.wire ? "Check Wise for the transfer — if it's arrived, use Mark deposit paid; if it's on its way, use Extend hold." : "If they still want the place, use Extend hold in the dashboard — their acceptance link then works again."]); }
+    try { await sendAdmissionsAlert(app, "Deposit not paid yet", [e.wire ? `This applicant said they'd pay ${usd(e.wire.amount)} by bank transfer (reference "${e.wire.reference}"), but it hasn't been marked as received.` : "This applicant was accepted but hasn't paid the deposit, and the plan discounts have now ended for them.", e.wire ? "Check Wise for the transfer — if it's arrived, use Mark deposit paid." : "Their acceptance link still works — they can confirm and pay any time. Worth a follow-up; use Extend discounts if you'd like to offer the savings again."]); }
     catch (err) { log.error?.("[payments hold alert]", err.message); }
   }
   return { holdExpired: true };
@@ -582,6 +622,8 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
             continue;
           }
         }
+        const ins = insuranceAction(e, now); // deposit paid another way, plan not chosen yet
+        if (ins) { const r = await insuranceReminder(app, ins, schema, now, log); if (r) out.actions.push({ id: app.id, ...r }); }
         const act = depositAction(e, app.decision, now, cfg);
         if (act.action === "remind") out.actions.push({ id: app.id, ...(await depositReminder(app, e, app.decision, act, schema, now, log)) });
         if (act.action === "expired") out.actions.push({ id: app.id, ...(await holdExpired(app, e, act, now, log)) });
@@ -598,6 +640,8 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
         const rc = await reconcileDealAmount(app, e, schema, { dealAmount: deal.amount, now, log });
         if (rc?.change) { out.actions.push({ id: app.id, repriced: rc.change.delta }); continue; }
       }
+      const ins = insuranceAction(e, now);
+      if (ins) { const r = await insuranceReminder(app, ins, schema, now, log); if (r) out.actions.push({ id: app.id, ...r }); }
       // One thing per application per run, in schedule order.
       let acted = false;
       for (let i = 0; i < (e.schedule || []).length; i++) {
@@ -1008,7 +1052,8 @@ export function portalPlan(app, { dealTotal = null, schema = null, now = new Dat
       state: "offer",
       paid,
       deposit: P.depositFor(paid),
-      holdUntil, holdPassed: !!(holdUntil && new Date(holdUntil) < new Date()),
+      // The acceptance never expires, so the portal shows no deadline.
+      holdUntil: null, holdPassed: false,
       start: e.offer?.start || d.offer?.start || null,
     };
   }

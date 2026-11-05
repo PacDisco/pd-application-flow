@@ -73,10 +73,13 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — the HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
   const paid = paidSoFar(app, {}, deal?.total);
+  // Scholarship students aren't offered the plan discounts.
+  const { enrolment: before } = await readEnrolment(app.id);
   return {
-    tuition, paid, deposit: P.depositFor(paid), discounts: planDiscounts(schema, app),
+    tuition, paid, deposit: P.depositFor(paid), discounts: before?.scholarship ? { full: 0, two: 0 } : planDiscounts(schema, app),
     start: dates.start, end: dates.end, programRecordId: dates.recordId,
     holdUntil: new Date(now.getTime() + holdDays * DAY).toISOString(), at: now.toISOString(),
+    discountUntil: new Date(now.getTime() + P.discountDays(schema) * DAY).toISOString(),
   };
 }
 
@@ -107,8 +110,12 @@ export function planDiscounts(schema, app) {
  * or today's settings if those are better (a discount added after they were
  * accepted still applies; lowering one never takes back what they were told).
  */
-export function familyDiscounts(app, enrolment, schema) {
+export function familyDiscounts(app, enrolment, schema, now = new Date()) {
   const o = enrolment?.offer || {};
+  // Scholarship: no plan discounts. After the discount window (7 days unless extended): none either.
+  if (enrolment?.scholarship) return { full: 0, two: 0 };
+  const end = P.discountWindowEnd(o, P.discountDays(schema));
+  if (end && now >= new Date(end)) return { full: 0, two: 0 };
   const fixed = o.discounts || { full: o.payInFullDiscount || 0, two: 0 };
   const live = planDiscounts(schema, app);
   return { full: Math.max(Number(fixed.full) || 0, live.full), two: Math.max(Number(fixed.two) || 0, live.two) };
@@ -130,16 +137,19 @@ export function payOffSaving(app, enrolment, schema, now = new Date()) {
   if (e.choice?.plan !== "later" || !e.offer?.start) return null;
   // The balance is due before the discounts end (90 vs 60 days out), so its due date is the deadline.
   const due = (e.schedule || []).find((p, i) => i > 0 && p.manual && OPEN_ITEMS.includes(p.status))?.due;
-  const last = P.discountLastDay(e.offer.start);
+  const last = discountsUntil(e.offer, schema);
   const until = due && due < last ? due : last;
   if (P.iso(now) > until) return null;
   const rest = restOf(e);
   if (rest <= 0) return null;
   const already = e.deposit?.discountPlan === "two" ? Number(e.deposit.discount) || 0 : 0;
-  const cents = Math.min(Math.round(rest * 100), Math.max(0, Math.round((familyDiscounts(app, e, schema).full - already) * 100)));
+  const cents = Math.min(Math.round(rest * 100), Math.max(0, Math.round((familyDiscounts(app, e, schema, now).full - already) * 100)));
   if (cents <= 0) return null;
   return { amount: cents / 100, rest, pay: (Math.round(rest * 100) - cents) / 100, until };
 }
+
+/** The last day (YYYY-MM-DD) this offer's discounts can be taken. */
+export const discountsUntil = (offer, schema) => P.discountsUntilDay(offer, P.discountDays(schema), process.env.INTERVIEW_TZ || "America/Denver");
 
 /** Pay-in-full discount alone (kept for callers of the first version). */
 export const payInFullDiscount = (schema, app) => planDiscounts(schema, app).full;
@@ -154,11 +164,7 @@ export function paidSoFar(app, enrolment = {}, dealTotal = null) {
 }
 
 /** Lives outside the US (home country on the application) → bank transfer is offered up front. */
-export function isInternational(app) {
-  const a = app?.answers || {};
-  const c = String(a.homeCountry || a.homeAddress?.country || "").trim();
-  return !!c && !/^(united states( of america)?|usa?|u\.s\.a?\.?)$/i.test(c);
-}
+export const isInternational = (app) => TK.isInternationalApp(app);
 
 /** What the family writes as the transfer reference, so it can be matched. */
 export const wireReference = (app) => `${app.first_name || ""} ${app.last_name || ""}`.trim().replace(/\s+/g, " ").slice(0, 40) + " - Pacific Discovery";
@@ -207,19 +213,19 @@ export function offerView(app, { enrolment = {}, decision = null, dealTotal = nu
   const prepaid = paidNow >= P.DEPOSIT_TOTAL ? paidNow : 0;
   // Until the deposit is in, the price follows the HubSpot deal (admissions may change it after acceptance).
   const o = { ...enrolment.offer, ...(Number(dealAmount) > 0 ? { tuition: Number(dealAmount) } : {}), paid: paidNow, deposit: P.depositFor(paidNow) };
+  // The acceptance never expires: they can always confirm and pay (only the plan discounts end).
   const holdUntil = decision.holdUntil || o.holdUntil;
-  const expired = !prepaid && holdUntil && new Date(holdUntil) < now;
   // Discounts: what they were offered at acceptance, or today's settings if
   // those are better (a discount added after they were accepted still applies;
   // lowering one never takes back what they were told).
-  const discounts = familyDiscounts(app, enrolment, schema);
+  const discounts = familyDiscounts(app, enrolment, schema, now);
   const opts = P.paymentOptions({ tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, today: P.iso(now), discounts });
   const rates = K.surchargeRates(schema);
   const saving = opts.options.some((x) => x.discount);
   return {
-    ...base, state: expired ? "expired" : "offer",
+    ...base, state: "offer",
     tuition: o.tuition, paid: o.paid, deposit: o.deposit, start: o.start, end: o.end, holdUntil,
-    ...(saving ? { discountsUntil: P.discountLastDay(o.start) } : {}),
+    ...(saving ? { discountsUntil: discountsUntil(o, schema) } : {}),
     // Bank transfer: offered up front to families outside the US, as a link otherwise.
     // (Not once the deposit is in: then they only choose a plan.)
     wire: !prepaid && TK.wireDetails(schema)
@@ -247,7 +253,6 @@ export async function startCheckout(app, { plan, method, agree, token }, schema,
     await patchEnrolment(app.id, { offer: enrolment.offer });
   }
   if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
-  if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
   if (view.state !== "offer") throw bad("There's no offer to confirm on this application.", 409);
   if (!agree) throw bad("Please agree to the Program Terms & Conditions to continue.");
   if (!["card", "ach"].includes(method)) throw bad("Choose card or bank account.");
@@ -435,7 +440,6 @@ export async function startWire(app, { plan, agree, token }, schema, now = new D
     await patchEnrolment(app.id, { offer: enrolment.offer });
   }
   if (view.state === "enrolled") throw bad("Your place is already confirmed.", 409);
-  if (view.state === "expired") throw bad("The hold on your place has passed. Please contact admissions — they can extend it.", 409);
   if (view.state !== "offer" || !view.wire) throw bad("Bank transfer isn't available for this offer.", 409);
   if (!agree) throw bad("Please agree to the Program Terms & Conditions to continue.");
   const option = view.options.find((o) => o.key === plan);
@@ -469,8 +473,8 @@ export async function startWire(app, { plan, agree, token }, schema, now = new D
   if (alertOn()) {
     try {
       await sendAdmissionsAlert(app, "Paying by bank transfer", [
-        `They chose to pay ${usd(amount)} by bank transfer (${planName}), reference "${view.wire.reference}". Their place is held until ${holdUntil}.`,
-        "When the money arrives in Wise, open the application in the dashboard and use Mark deposit paid. They'll then be emailed to confirm their payment plan. If it's slow to arrive, use Extend hold.",
+        `They chose to pay ${usd(amount)} by bank transfer (${planName}), reference "${view.wire.reference}".`,
+        "When the money arrives in Wise, open the application in the dashboard and use Mark deposit paid. They'll then be emailed to confirm their payment plan.",
       ]);
     } catch (err) { log.error?.("[wire alert]", err.message); }
   }

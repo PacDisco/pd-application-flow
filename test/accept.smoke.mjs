@@ -109,7 +109,7 @@ try {
     }
     await page.waitForSelector('.wire');
     assert.match(await page.textContent('.wire'), /TRWIUS35XXX/);
-    assert.match(await page.textContent('#pay'), /Email me the details/);
+    assert.match(await page.textContent('#pay'), /Email me the bank details/);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/wire-${tag}.png`, fullPage: true });
     await page.check('#agree');
     await page.click('#pay');
