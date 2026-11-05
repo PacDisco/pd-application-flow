@@ -502,6 +502,16 @@ await t('discounts last 7 days after acceptance; admissions can extend them; sch
   }
 });
 
+await t('linked to a program record with no start date → falls back to the matching record; the error says which record when nothing has one', async () => {
+  const E = await import('../netlify/functions/_lib/enrol.mjs');
+  const base = { program: 'South America Gap Semester', program_type: 'semester', season: 'Fall', travel_year: '2027' };
+  const d = await E.programDates({ ...base, sync: { hsProgram: { record: { id: '54796059552' } } } });
+  assert.equal(d.start, '2027-09-09', 'matched P5 instead');
+  const none = await E.programDates({ ...base, travel_year: '2031', sync: { hsProgram: { record: { id: '54796059552' } } } });
+  assert.equal(none.start, null);
+  assert.match(none.reason, /linked record .* has no Program Start Date/);
+});
+
 up.restore();
 await pool.end();
 console.log(`enrol: ${n} passed`);

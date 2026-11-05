@@ -221,7 +221,9 @@ function recordFacts(rec) {
  */
 export function matchProgramRecord(records, { program, pdProgram, programType, season, year }) {
   const want = [tokens(program), pdProgram ? tokens(pdProgram) : null].filter((t) => t && t.length);
-  const wantKind = programType || kindOf(program || "");
+  // The program's own name wins when it says "Mini" / "Summer" (a stored type can be stale or wrong).
+  const nameKind = kindOf(program || "");
+  const wantKind = nameKind !== "semester" ? nameKind : (programType || nameKind);
   const scored = [];
   for (const rec of records || []) {
     if (GLOBAL_PROGRAM_RECORD_IDS.has(String(rec.id))) continue;

@@ -110,4 +110,12 @@ t('parent contacts from the answers', () => {
   assert.equal(R.isForward(pipe, 'l', R.findStage(pipe, 'accepted')), false, 'a closed deal is not reopened automatically');
   console.log('  ✓ stage mapping for the PD program pipelines');
 }
+{
+  // A stored type of "semester" on a Mini program (e.g. set wrongly) must not hide the Mini record.
+  const recs = [{ id: '54796076342', properties: { program_name: '2027 Japan Mini Semester', pacific_discovery_program: '2027 Japan Spring Mini Semester', program_start_date: '2027-03-18', program_end_date: '2027-04-21' } }];
+  for (const programType of ['mini', null, 'semester']) {
+    assert.equal(R.matchProgramRecord(recs, { program: 'Japan Mini Semester', programType, season: 'Spring', year: '2027' }).record?.id, '54796076342', String(programType));
+  }
+  n++; console.log('  ✓ the program name decides Mini / Summer even when the stored type says semester');
+}
 console.log(`\n${n} passed`);

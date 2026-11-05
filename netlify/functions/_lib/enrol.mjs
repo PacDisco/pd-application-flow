@@ -48,16 +48,27 @@ export async function patchEnrolment(id, patch) {
 
 /** The departure's start (and end) date from its HubSpot program record. */
 export async function programDates(app) {
-  let recordId = app.sync?.hsProgram?.record?.id || null;
-  if (!recordId && hubspotOn()) {
-    const records = await HS.programRecords(R.PROGRAM_OBJECT_TYPE);
-    const m = R.matchProgramRecord(records, { program: app.program, programType: app.program_type, season: app.season, year: app.travel_year });
-    recordId = m.record?.id || null;
-  }
-  if (!recordId) return { start: null, end: null, recordId: null };
-  const rec = await HS.hs(`/crm/v3/objects/${R.PROGRAM_OBJECT_TYPE}/${recordId}?properties=program_start_date,program_end_date`);
   const d = (v) => (v ? String(v).slice(0, 10) : null);
-  return { start: d(rec?.properties?.program_start_date), end: d(rec?.properties?.program_end_date), recordId: String(recordId) };
+  const read = async (id) => {
+    const rec = await HS.hs(`/crm/v3/objects/${R.PROGRAM_OBJECT_TYPE}/${id}?properties=program_start_date,program_end_date,pacific_discovery_program`);
+    return { start: d(rec?.properties?.program_start_date), end: d(rec?.properties?.program_end_date), recordId: String(id), name: rec?.properties?.pacific_discovery_program || null };
+  };
+  // The record the student is linked to, if it has dates…
+  const linked = app.sync?.hsProgram?.record?.id || null;
+  let first = null;
+  if (linked) {
+    first = await read(linked);
+    if (first.start) return first;
+  }
+  // …otherwise the record matching their program and term.
+  if (!hubspotOn()) return first || { start: null, end: null, recordId: null };
+  const records = await HS.programRecords(R.PROGRAM_OBJECT_TYPE);
+  const m = R.matchProgramRecord(records, { program: app.program, programType: app.program_type, season: app.season, year: app.travel_year });
+  if (m.record?.id && String(m.record.id) !== String(linked)) {
+    const hit = await read(m.record.id);
+    if (hit.start) return hit;
+  }
+  return { start: null, end: null, recordId: first?.recordId || m.record?.id || null, reason: first ? `linked record "${first.name || first.recordId}" has no Program Start Date` : (m.reason || null) };
 }
 
 /**
@@ -70,7 +81,7 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   const tuition = Number(deal?.amount) || Number(app.deal_amount) || Number(K.programByName(schema, app.program)?.price) || 0;
   if (!tuition) throw bad(`No program price for ${app.program} — set it in Programs & dates first.`, 409);
   const dates = await programDates(app);
-  if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — the HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
+  if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — ${dates.reason ? `${dates.reason}. ` : ""}The HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
   const paid = paidSoFar(app, {}, deal?.total);
   // Scholarship students aren't offered the plan discounts.
