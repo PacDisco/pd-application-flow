@@ -302,7 +302,7 @@ async function insuranceReminder(app, act, schema, now, log) {
   if (!rows.length) return { skipped: "taken" };
   try {
     const cfarBy = new Date(act.cfarBy).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
-    const email = await familyEmail(app, schema, "insuranceReminder", { cfarBy, insurance: TK.insuranceBlock(schema, { cfarBy }) }, { log });
+    const email = await familyEmail(app, schema, "insuranceReminder", { cfarBy, insurance: TK.insuranceBlock(schema, { cfarBy, sid: "day5" }) }, { log });
     if (!email.skipped) await patchEnrolment(app.id, { insuranceReminder: { at: now.toISOString(), to: email.to } });
     return { insurance: true };
   } catch (err) {

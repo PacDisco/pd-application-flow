@@ -387,7 +387,7 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     tuition: usd(offer?.tuition ?? 0),
     howToPay,
     message: String(message || "").trim(),
-    insurance: TK.insuranceBlock(schema),
+    insurance: TK.insuranceBlock(schema, { sid: "acceptance" }),
     link: link || "",
   };
   // An acceptance email edited in the dashboard before {insurance} existed still gets the section, before the sign-off.

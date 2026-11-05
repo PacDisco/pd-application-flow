@@ -629,7 +629,8 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   const acc = mails.at(-1);
   assert.match(acc.text, /Travel insurance/);
   assert.match(acc.text, /Pacific Discovery requires every student to have travel insurance/);
-  assert.match(acc.text, /kqzyfj\.com\/click-101918016-17344096/);
+  assert.match(acc.text, /https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance\b/);
+  assert.match(acc.html, /href="https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance"/);
   assert.match(acc.text, /World Nomads affiliate and may receive a fee/);
   assert.match(acc.text, /often just 7 days/);
   assert.match(acc.text, /\$250,000 emergency medical and \$700,000 emergency evacuation/);
@@ -651,6 +652,7 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   assert.match(ins[0].subject, /Cancel For Any Reason window closes \w+day/);
   assert.match(ins[0].text, /which for you is \*?\*?\w+day, \w+ \d+/);
   assert.match(ins[0].text, /World Nomads affiliate/);
+  assert.match(ins[0].text, /click-101918016-17344096\?sid=day5\b/);
   assert.ok(ins[0].to.includes('parent.ins@x.org'), 'parents too');
   const b = await accepted('ins2@x.org');
   const N = await import('../netlify/functions/_lib/notify.mjs');
