@@ -387,14 +387,17 @@ export function acceptedContent(app, schema, { offer, link, terms = null, messag
     tuition: usd(offer?.tuition ?? 0),
     howToPay,
     message: String(message || "").trim(),
+    flights: TK.flightsNote(schema),
     insurance: TK.insuranceBlock(schema, { sid: "acceptance", start: offer?.start || "", end: offer?.end || "" }),
     link: link || "",
   };
   // An acceptance email edited in the dashboard before {insurance} existed still gets the section, before the sign-off.
   let tplBody = tpl.body;
-  if (vars.insurance && !tplBody.includes("{insurance}")) {
-    const i = tplBody.lastIndexOf("\nPacific Discovery");
-    tplBody = i > 0 ? `${tplBody.slice(0, i)}\n{insurance}\n${tplBody.slice(i)}` : `${tplBody}\n\n{insurance}`;
+  for (const key of ["flights", "insurance"]) {
+    if (!vars[key] || tplBody.includes(`{${key}}`)) continue;
+    // Before the insurance section if it's there, else before the sign-off.
+    const anchor = key === "flights" && tplBody.includes("{insurance}") ? tplBody.indexOf("{insurance}") : tplBody.lastIndexOf("\nPacific Discovery");
+    tplBody = anchor > 0 ? `${tplBody.slice(0, anchor)}\n{${key}}\n\n${tplBody.slice(anchor)}` : `${tplBody}\n\n{${key}}`;
   }
   const body = TK.fillTemplate(tplBody, vars).replace(/\s*\(\s*\)/g, "").replace(/, starting \./, ".").replace(/\n{3,}/g, "\n\n");
   const subject = TK.fillTemplate(tpl.subject, vars);

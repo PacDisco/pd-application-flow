@@ -630,6 +630,13 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   const acc = mails.at(-1);
   assert.match(acc.text, /Travel insurance/);
   assert.match(acc.text, /Pacific Discovery requires every student to have travel insurance/);
+  assert.match(acc.text, /Please don't book any flights yet.*admissions has approved your flights/s);
+  assert.ok(acc.text.indexOf("book any flights yet") < acc.text.indexOf('Travel insurance'), 'flights note before insurance');
+  const N0 = await import('../netlify/functions/_lib/notify.mjs');
+  const custom = { ...schema, settings: { ...schema.settings, emails: { accepted: { body: 'Hi {firstName},\n\nWelcome!\n\n[Confirm]({link})\n\nPacific Discovery Admissions' } } } };
+  const appRow = (await pool.query('SELECT * FROM applications WHERE id = $1', [a.id])).rows[0];
+  const cm = N0.acceptedContent(appRow, custom, { offer: (await enrolment(a.id)).offer, link: 'https://x' });
+  assert.ok(cm.text.indexOf("book any flights yet") > 0 && cm.text.indexOf("book any flights yet") < cm.text.indexOf('Travel insurance') && cm.text.indexOf('Travel insurance') < cm.text.lastIndexOf('Pacific Discovery Admissions'), 'edited template still gets both, in order');
   assert.match(acc.text, /https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance\b/);
   assert.match(acc.html, /href="https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance"/);
   assert.match(acc.text, /World Nomads affiliate and may receive a fee/);
