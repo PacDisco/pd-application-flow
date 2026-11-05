@@ -226,15 +226,34 @@ export function repriceSchedule(e, delta, today) {
  * and pd-apply's own discount updates); with no baseline yet it's just recorded.
  */
 export async function reconcileDealAmount(app, e, schema, { dealAmount, now = new Date(), log = console } = {}) {
-  const amount = Math.round(Number(dealAmount) * 100) / 100;
+  let amount = Math.round(Number(dealAmount) * 100) / 100;
   if (!(amount > 0) || e?.deposit?.status !== "paid" || e.withdrawn || !e.offer) return null;
   if (e.dealAmount == null) {
     await db().query(`UPDATE applications SET enrolment = enrolment || jsonb_build_object('dealAmount', $2::numeric) WHERE id = $1 AND NOT (enrolment ? 'dealAmount')`, [app.id, amount]);
     return { baseline: amount };
   }
   const base = Number(e.dealAmount);
+  if (Math.abs(amount - base) < 0.01) return null;
+  // Looks different: read the deal again, uncached (a cached read from just before
+  // their payment still shows the old amount — what caused a false "price changed").
+  const fresh = await dealPaid(app, { fresh: true });
+  if (fresh?.amount) amount = Math.round(Number(fresh.amount) * 100) / 100;
+  if (Math.abs(amount - base) < 0.01) return null;
+  // What they've agreed to pay overall: the price less any plan discount pd-apply applied.
+  const contract = Math.round((Number(e.offer.tuition) - (Number(e.deposit?.discount) || 0) - (Number(e.payOff?.discount) || 0)) * 100) / 100;
+  if (Math.abs(amount - contract) < 0.01) {
+    // The deal now shows what they owe (e.g. our pay-in-full discount reached HubSpot): not a price change.
+    await db().query(`UPDATE applications SET enrolment = enrolment || jsonb_build_object('dealAmount', $2::numeric) WHERE id = $1`, [app.id, amount]);
+    return { synced: amount };
+  }
+  if (contract < Number(e.offer.tuition) && Math.abs(amount - Number(e.offer.tuition)) < 0.01) {
+    // The deal still shows the full price although a discount applies: put the discounted amount back, never charge it.
+    try { await HS.updateDeal(app.hubspot_deal_id, { amount: String(contract) }); } catch (err) { log.error?.("[payments deal amount]", err.message); return { busy: true }; }
+    await db().query(`UPDATE applications SET enrolment = enrolment || jsonb_build_object('dealAmount', $2::numeric) WHERE id = $1`, [app.id, contract]);
+    await note(app, `<p><strong>Deal amount corrected</strong> — set back to ${usd(contract)} (${usd(Number(e.offer.tuition))} less their plan discount).</p>`, log);
+    return { fixedDeal: contract };
+  }
   const delta = Math.round((amount - base) * 100) / 100;
-  if (Math.abs(delta) < 0.01) return null;
   const today = localDay(now, paymentSettings(schema).tz);
   const r = repriceSchedule(e, delta, today);
   if (!r) return { busy: true };
@@ -252,6 +271,9 @@ export async function reconcileDealAmount(app, e, schema, { dealAmount, now = ne
   const enrolment = rows[0].enrolment;
   const upcoming = enrolment.schedule.filter((p, i) => i > 0 && OPEN.includes(p.status));
   await note(app, `<p><strong>Price changed on the deal</strong> — ${usd(base)} → ${usd(amount)} (${delta > 0 ? "+" : ""}${usd(delta)}). ${r.added ? `Nothing was left to pay, so a balance of ${usd(delta)} is now due ${esc(r.added.due)}.` : `Spread over the ${upcoming.length} remaining payment${upcoming.length === 1 ? "" : "s"}.`}${r.unapplied > 0 ? ` <strong>They've overpaid by ${usd(r.unapplied)}</strong> — admissions alerted to refund.` : ""}</p>`, log);
+  // Nothing they still owe changed (and nothing to refund or add): note only, no email.
+  const touched = r.added || r.unapplied > 0 || r.schedule.some((p, i) => p.priceChange && JSON.stringify(p) !== JSON.stringify((e.schedule || [])[i]));
+  if (!touched) return { enrolment, change, emailed: false };
   try {
     const schedule = upcoming.length
       ? upcoming.map((p) => `- ${longDate(p.due)} — ${usd(p.amount)}${p.manual ? " (due by this date)" : " (automatic)"}`).join("\n")
@@ -267,6 +289,33 @@ export async function reconcileDealAmount(app, e, schema, { dealAmount, now = ne
     catch (err) { log.error?.("[payments reprice alert]", err.message); }
   }
   return { enrolment, change };
+}
+
+/** Tuition paid in full: deposit in, nothing open or in flight. Pure (tested). */
+export function fullyPaid(e) {
+  if (!e || e.withdrawn || e.deposit?.status !== "paid") return false;
+  return !(e.schedule || []).some((p) => [...OPEN, "charging", "processing"].includes(p.status));
+}
+
+/** Paid in full → the HubSpot deal moves to Closed Won (once; never out of a closed or cancelled stage). */
+export async function closeWonIfPaid(app, e, { log = console } = {}) {
+  if (e?.closedWon || !fullyPaid(e) || !hubspotOn() || !app.hubspot_deal_id) return null;
+  try {
+    const deal = await HS.getDeal(app.hubspot_deal_id);
+    const pipe = (await HS.dealPipelines()).find((p) => p.id === String(deal?.properties?.pipeline));
+    const won = R.findStage(pipe, "closedWon");
+    const cur = pipe?.stages?.find((s) => String(s.id) === String(deal?.properties?.dealstage));
+    if (!won) return null; // pipeline has no Closed Won stage: try again next run
+    const at = new Date().toISOString();
+    if (String(cur?.id) === String(won.id) || /closed|cancel/i.test(cur?.label || "")) {
+      await patchEnrolment(app.id, { closedWon: { at, stage: cur?.label || null, skipped: true } });
+      return { closedWon: "already closed" };
+    }
+    await HS.updateDeal(app.hubspot_deal_id, { dealstage: won.id });
+    await patchEnrolment(app.id, { closedWon: { at, stage: won.label } });
+    await note(app, `<p><strong>Tuition paid in full</strong> — deal moved to ${esc(won.label)}.</p>`, log);
+    return { closedWon: won.label };
+  } catch (err) { log.error?.("[payments closed won]", err.message); return { error: err.message }; }
 }
 
 /** "Pay in full and save $500, or in two instalments and save $250" (offer savings, for the emails). */
@@ -642,6 +691,8 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
       }
       const ins = insuranceAction(e, now);
       if (ins) { const r = await insuranceReminder(app, ins, schema, now, log); if (r) out.actions.push({ id: app.id, ...r }); }
+      // Paid in full → Closed Won.
+      if (fullyPaid(e) && !e.closedWon) { const r = await closeWonIfPaid(app, e, { log }); if (r) out.actions.push({ id: app.id, ...r }); continue; }
       // One thing per application per run, in schedule order.
       let acted = false;
       for (let i = 0; i < (e.schedule || []).length; i++) {

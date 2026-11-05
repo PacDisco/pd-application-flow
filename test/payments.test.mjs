@@ -665,6 +665,86 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   assert.doesNotMatch(N.acceptedContent(app, off, { offer: (await enrolment(b.id)).offer, link: 'https://x' }).text, /Travel insurance/);
 });
 
+await t('pay-in-full discount is never mistaken for a price change: stale baseline → synced quietly; discount missing on the deal → put back, no email', async () => {
+  schema.settings.discounts = DISC;
+  const a = await accepted('nochange@x.org');
+  delete schema.settings.discounts;
+  setPrice(a.deal, 15500);
+  const r = await api('checkout', { token: a.token, plan: 'full', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  assert.equal(up.crm.deals.get(a.deal).properties.amount, '15000', 'deal shows the discounted price');
+  // the race seen in production: a baseline of the pre-discount price
+  await pool.query(`UPDATE applications SET enrolment = enrolment || '{"dealAmount": 15500}'::jsonb WHERE id = $1`, [a.id]);
+  __clearDealPaidCache();
+  let before = mails.length;
+  await run(at('2027-01-10'));
+  assert.ok(!mails.slice(before).some((m) => /schedule .* updated/i.test(m.subject)), 'no "schedule updated" email');
+  let e = await enrolment(a.id);
+  assert.equal(Number(e.dealAmount), 15000); assert.equal(e.priceChanges, undefined);
+  // the discount write never reached HubSpot: the deal says 15,500 again
+  setPrice(a.deal, 15500);
+  before = mails.length;
+  await run(at('2027-01-11'));
+  assert.equal(up.crm.deals.get(a.deal).properties.amount, '15000', 'put back');
+  assert.ok(!mails.slice(before).some((m) => /schedule .* updated|Overpaid/i.test(m.subject)));
+  e = await enrolment(a.id);
+  assert.equal(e.priceChanges, undefined);
+});
+
+await t('paid in full → deal moves to Closed Won (once); not while payments are open; never out of Cancelled', async () => {
+  assert.equal(PAY.fullyPaid({ deposit: { status: 'paid' }, schedule: [{ status: 'paid' }, { status: 'paid' }] }), true);
+  assert.equal(PAY.fullyPaid({ deposit: { status: 'paid' }, schedule: [{ status: 'paid' }, { status: 'scheduled' }] }), false);
+  assert.equal(PAY.fullyPaid({ deposit: { status: 'paid' }, schedule: [{ status: 'paid' }, { status: 'processing' }] }), false);
+  assert.equal(PAY.fullyPaid({ deposit: { status: 'paid' }, withdrawn: { at: 'x' }, schedule: [] }), false);
+  const a = await accepted('won@x.org');
+  const r = await api('checkout', { token: a.token, plan: 'full', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${a.token}&session_id=${s.id}`);
+  assert.equal(up.crm.deals.get(a.deal).properties.dealstage, 'f9d', 'Deposit Paid first');
+  await run(at('2027-01-10'));
+  assert.equal(up.crm.deals.get(a.deal).properties.dealstage, 'f9w', 'Closed Won');
+  assert.match(up.crm.notes.at(-1).properties.hs_note_body, /paid in full<\/strong> — deal moved to Closed Won/);
+  assert.equal((await enrolment(a.id)).closedWon.stage, 'Closed Won');
+  // monthly: not until the last payment
+  const m = await enrolled('won2@x.org', 'monthly');
+  await run(at('2026-12-01'));
+  assert.notEqual(up.crm.deals.get(m.deal).properties.dealstage, 'f9w');
+  // cancelled deals stay cancelled
+  const c = await accepted('won3@x.org');
+  const r3 = await api('checkout', { token: c.token, plan: 'full', method: 'card', agree: true });
+  const s3 = up.stripe.sessions.get(r3.body.url.split('/').pop());
+  Object.assign(s3, { status: 'complete', payment_status: 'paid' });
+  await api(`offer?token=${c.token}&session_id=${s3.id}`);
+  up.crm.deals.get(c.deal).properties.dealstage = 'f9x';
+  await run(at('2027-01-10'));
+  assert.equal(up.crm.deals.get(c.deal).properties.dealstage, 'f9x');
+});
+
+await t('a stale cached deal read (old amount from just before the payment) never triggers a price change', async () => {
+  schema.settings.discounts = DISC;
+  const a = await accepted('stale@x.org');
+  delete schema.settings.discounts;
+  setPrice(a.deal, 15500);
+  const { dealPaid } = await import('../netlify/functions/_lib/deal-paid.mjs');
+  await dealPaid({ hubspot_deal_id: a.deal }, { fresh: true }); // warm the cache with 15,500
+  const r = await api('checkout', { token: a.token, plan: 'full', method: 'card', agree: true });
+  const s = up.stripe.sessions.get(r.body.url.split('/').pop());
+  Object.assign(s, { status: 'complete', payment_status: 'paid' });
+  // the deal is now 15,000 in HubSpot; put the stale 15,500 back in the cache like a warm function would have
+  up.crm.deals.get(a.deal).properties.amount = '15500'; __clearDealPaidCache(); await dealPaid({ hubspot_deal_id: a.deal }, { fresh: true });
+  const before = mails.length;
+  await api(`offer?token=${a.token}&session_id=${s.id}`); // writes 15,000, then the page reads the deal (cached 15,500)
+  await api(`offer?token=${a.token}`);
+  assert.equal(up.crm.deals.get(a.deal).properties.amount, '15000');
+  assert.ok(!mails.slice(before).some((m) => /schedule .* updated/i.test(m.subject)), 'no false price-change email');
+  const e = await enrolment(a.id);
+  assert.equal(e.priceChanges, undefined);
+  assert.ok(!(e.schedule || []).some((p) => p.reason === 'price change'));
+});
+
 up.restore();
 await pool.end();
 console.log(`payments: ${n} passed`);

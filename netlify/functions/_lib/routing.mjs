@@ -36,6 +36,8 @@ export const STAGES = {
   declined: [/declined/i, /not\s*accepted/i, /rejected/i, /unsuccessful/i, /closed\s*lost/i],
   // Withdrew after paying the deposit (what's been paid is kept, per the terms).
   cancelled: [/cancel/i],
+  // Tuition paid in full.
+  closedWon: [/closed\s*won/i, /^won$/i],
 };
 
 /**
