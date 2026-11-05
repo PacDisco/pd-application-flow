@@ -291,7 +291,7 @@ export function insuranceAction(e, now = new Date()) {
   const t = new Date(paidAt).getTime();
   const days = (now.getTime() - t) / DAY;
   if (days < INSURANCE_REMIND_DAY || days >= CFAR_DAYS) return null;
-  return { paidAt, cfarBy: new Date(t + CFAR_DAYS * DAY) };
+  return { paidAt, cfarBy: new Date(t + CFAR_DAYS * DAY), start: e.offer?.start || null, end: e.offer?.end || null };
 }
 
 async function insuranceReminder(app, act, schema, now, log) {
@@ -302,7 +302,7 @@ async function insuranceReminder(app, act, schema, now, log) {
   if (!rows.length) return { skipped: "taken" };
   try {
     const cfarBy = new Date(act.cfarBy).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: process.env.INTERVIEW_TZ || "America/Denver" });
-    const email = await familyEmail(app, schema, "insuranceReminder", { cfarBy, insurance: TK.insuranceBlock(schema, { cfarBy, sid: "day5" }) }, { log });
+    const email = await familyEmail(app, schema, "insuranceReminder", { cfarBy, insurance: TK.insuranceBlock(schema, { cfarBy, sid: "day5", start: act.start || "", end: act.end || "" }) }, { log });
     if (!email.skipped) await patchEnrolment(app.id, { insuranceReminder: { at: now.toISOString(), to: email.to } });
     return { insurance: true };
   } catch (err) {

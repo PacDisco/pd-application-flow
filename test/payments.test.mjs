@@ -618,6 +618,7 @@ await t('insuranceAction (pure): day 5 to day 7 after the deposit, once; never l
   assert.equal(PAY.insuranceAction(e, new Date('2026-11-15T17:00:00Z')), null, 'not yet');
   const a = PAY.insuranceAction(e, new Date('2026-11-15T19:00:00Z'));
   assert.equal(a.cfarBy.toISOString(), '2026-11-17T18:00:00.000Z');
+  assert.equal(a.start, null);
   assert.equal(PAY.insuranceAction({ ...e, insuranceReminder: { at: 'x' } }, new Date('2026-11-16T00:00:00Z')), null, 'once');
   assert.equal(PAY.insuranceAction(e, new Date('2026-11-18T00:00:00Z')), null, 'too late — skipped');
   assert.ok(PAY.insuranceAction({ prepaid: { at: paidAt } }, new Date('2026-11-15T19:00:00Z')), 'deposit paid another way');
@@ -632,6 +633,7 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   assert.match(acc.text, /https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance\b/);
   assert.match(acc.html, /href="https:\/\/www\.kqzyfj\.com\/click-101918016-17344096\?sid=acceptance"/);
   assert.match(acc.text, /World Nomads affiliate and may receive a fee/);
+  assert.match(acc.text, /travel days on each side of the program \(the program itself runs September 9, 2027 – December 10, 2027\)/);
   assert.match(acc.text, /often just 7 days/);
   assert.match(acc.text, /\$250,000 emergency medical and \$700,000 emergency evacuation/);
   assert.doesNotMatch(acc.text, /Epic|Explorer|covers everything/, 'no plan recommendations or coverage claims');
@@ -653,6 +655,7 @@ await t('acceptance email has the insurance section (our requirement, World Noma
   assert.match(ins[0].text, /which for you is \*?\*?\w+day, \w+ \d+/);
   assert.match(ins[0].text, /World Nomads affiliate/);
   assert.match(ins[0].text, /click-101918016-17344096\?sid=day5\b/);
+  assert.match(ins[0].text, /travel days on each side of the program/);
   assert.ok(ins[0].to.includes('parent.ins@x.org'), 'parents too');
   const b = await accepted('ins2@x.org');
   const N = await import('../netlify/functions/_lib/notify.mjs');
