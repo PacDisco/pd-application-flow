@@ -510,6 +510,11 @@ await t('linked to a program record with no start date → falls back to the mat
   const none = await E.programDates({ ...base, travel_year: '2031', sync: { hsProgram: { record: { id: '54796059552' } } } });
   assert.equal(none.start, null);
   assert.match(none.reason, /linked record .* has no Program Start Date/);
+  // linked to a record that was deleted / merged in HubSpot (404) → matched again
+  const gone = await E.programDates({ ...base, sync: { hsProgram: { record: { id: '64045571078' } } } });
+  assert.equal(gone.start, '2027-09-09');
+  const gone2 = await E.programDates({ ...base, travel_year: '2031', sync: { hsProgram: { record: { id: '64045571078' } } } });
+  assert.match(gone2.reason, /no longer exists in HubSpot/);
 });
 
 up.restore();

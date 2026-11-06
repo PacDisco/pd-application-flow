@@ -50,7 +50,13 @@ export async function patchEnrolment(id, patch) {
 export async function programDates(app) {
   const d = (v) => (v ? String(v).slice(0, 10) : null);
   const read = async (id) => {
-    const rec = await HS.hs(`/crm/v3/objects/${R.PROGRAM_OBJECT_TYPE}/${id}?properties=program_start_date,program_end_date,pacific_discovery_program`);
+    let rec = null;
+    try { rec = await HS.hs(`/crm/v3/objects/${R.PROGRAM_OBJECT_TYPE}/${id}?properties=program_start_date,program_end_date,pacific_discovery_program`); }
+    catch (err) {
+      // The linked record was deleted or merged in HubSpot: treat it as missing and match again.
+      if (err.status === 404) return { start: null, end: null, recordId: String(id), name: null, gone: true };
+      throw err;
+    }
     return { start: d(rec?.properties?.program_start_date), end: d(rec?.properties?.program_end_date), recordId: String(id), name: rec?.properties?.pacific_discovery_program || null };
   };
   // The record the student is linked to, if it has dates…
@@ -59,6 +65,8 @@ export async function programDates(app) {
   if (linked) {
     first = await read(linked);
     if (first.start) return first;
+    // Gone from HubSpot: forget the link so the next sync links them to the current record.
+    if (first.gone && app.id) await A.setSyncPatch(app.id, { hsProgram: undefined }).catch(() => {});
   }
   // …otherwise the record matching their program and term.
   if (!hubspotOn()) return first || { start: null, end: null, recordId: null };
@@ -68,7 +76,9 @@ export async function programDates(app) {
     const hit = await read(m.record.id);
     if (hit.start) return hit;
   }
-  return { start: null, end: null, recordId: first?.recordId || m.record?.id || null, reason: first ? `linked record "${first.name || first.recordId}" has no Program Start Date` : (m.reason || null) };
+  return { start: null, end: null, recordId: first?.recordId || m.record?.id || null,
+    reason: first?.gone ? `the linked program record (${first.recordId}) no longer exists in HubSpot${m.reason ? `, and ${m.reason.replace(/^No/, "no")}` : ""}`
+      : first ? `linked record "${first.name || first.recordId}" has no Program Start Date` : (m.reason || null) };
 }
 
 /**
