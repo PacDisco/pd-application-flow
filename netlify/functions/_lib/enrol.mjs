@@ -93,7 +93,7 @@ export async function makeOffer(app, schema, { holdDays, now = new Date() } = {}
   const dates = await programDates(app);
   if (!dates.start) throw bad(`No start date for ${app.program} ${app.term || ""} — ${dates.reason ? `${dates.reason}. ` : ""}The HubSpot program record needs a Program Start Date before this applicant can be accepted.`.replace(/\s+—/, " —"), 409);
   if (P.day(dates.start) <= P.day(now)) throw bad("This departure has already started.", 409);
-  const paid = paidSoFar(app, {}, deal?.total);
+  const paid = paidSoFar(app, {}, deal);
   // Scholarship students aren't offered the plan discounts.
   const { enrolment: before } = await readEnrolment(app.id);
   return {
@@ -180,8 +180,12 @@ export const payInFullDiscount = (schema, app) => planDiscounts(schema, app).ful
  * what admissions marked paid, and what the HubSpot deal's payment fields say.
  */
 export function paidSoFar(app, enrolment = {}, dealTotal = null) {
+  // dealTotal: a number, or what dealPaid() returns ({ total, refunded }).
+  const d = dealTotal && typeof dealTotal === "object" ? dealTotal : { total: dealTotal, refunded: false };
+  // The deal records a refund (e.g. "-250, refunded"): its rows are the up-to-date record, so they decide.
+  if (d.refunded && d.total != null) return Math.max(0, Number(d.total) || 0);
   const fee = app?.paid_at ? Number(app.payment?.base ?? 250) : 0;
-  return Math.max(fee, Number(enrolment?.prepaid?.total) || 0, Number(dealTotal) || 0);
+  return Math.max(fee, Number(enrolment?.prepaid?.total) || 0, Number(d.total) || 0);
 }
 
 /** Lives outside the US (home country on the application) → bank transfer is offered up front. */
@@ -267,7 +271,7 @@ export async function startCheckout(app, { plan, method, agree, token }, schema,
   const { enrolment, decision } = await readEnrolment(app.id);
   const terms = await publishedTermsOrNull();
   const deal = await dealPaid(app, { fresh: true });
-  const view = offerView(app, { enrolment, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
+  const view = offerView(app, { enrolment, decision, dealTotal: deal ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
   // Keep the stored offer's price in step with the deal (what the plan and the discount maths use).
   if (view.tuition && enrolment.offer && Number(enrolment.offer.tuition) !== view.tuition) {
     enrolment.offer = { ...enrolment.offer, tuition: view.tuition, priceFromDealAt: now.toISOString() };
@@ -454,7 +458,7 @@ export async function startWire(app, { plan, agree, token }, schema, now = new D
   const { enrolment, decision } = await readEnrolment(app.id);
   const terms = await publishedTermsOrNull();
   const deal = await dealPaid(app, { fresh: true });
-  const view = offerView(app, { enrolment, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
+  const view = offerView(app, { enrolment, decision, dealTotal: deal ?? null, dealAmount: deal?.amount ?? null }, schema, terms, now);
   // Keep the stored offer's price in step with the deal (what the plan and the discount maths use).
   if (view.tuition && enrolment.offer && Number(enrolment.offer.tuition) !== view.tuition) {
     enrolment.offer = { ...enrolment.offer, tuition: view.tuition, priceFromDealAt: now.toISOString() };

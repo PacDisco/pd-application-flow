@@ -665,7 +665,7 @@ export async function runPayments({ schema, now = new Date(), log = console } = 
       if (!["paid", "processing"].includes(e.deposit?.status)) {
         // Deposit paid another way and on the HubSpot deal → ask them to choose a plan (once).
         if (!e.prepaid) {
-          const total = paidSoFar(app, e, (await dealPaid(app, { fresh: true }))?.total);
+          const total = paidSoFar(app, e, await dealPaid(app, { fresh: true }));
           if (total >= P.DEPOSIT_TOTAL) {
             out.actions.push({ id: app.id, ...(await recordPrepaid(app, { total, source: "hubspot", by: "the HubSpot deal" }, schema, { log })) });
             continue;
@@ -1012,7 +1012,7 @@ export async function markDepositPaid(appId, { amount, reference = "", by = "adm
   const { enrolment: e, decision: d } = await readEnrolment(appId);
   if (d?.outcome !== "accepted" || !e.offer) throw bad("Accept the application first (that sets the offer the plan is built from).", 409);
   if (["paid", "processing"].includes(e.deposit?.status) || e.prepaid) throw bad("The deposit is already recorded.", 409);
-  const fee = paidSoFar(app, e, (await dealPaid(app, { fresh: true }))?.total);
+  const fee = paidSoFar(app, e, await dealPaid(app, { fresh: true }));
   const amt = Math.round((Number(amount) || P.depositFor(fee)) * 100) / 100;
   if (amt <= 0) throw bad("Enter the amount paid.");
   return recordPrepaid(app, { total: fee + amt, deposit: amt, reference, by, source: "admissions" }, schema, { log });

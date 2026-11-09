@@ -101,12 +101,12 @@ export default async (req) => {
     }
     if (req.method === "GET" && route === "plan") {
       const app = await PAY.appForPortal({ dealId: url.searchParams.get("dealId"), email: url.searchParams.get("email") });
-      return json({ plan: app ? PAY.portalPlan(app, { dealTotal: (await dealPaid(app))?.total ?? null, schema }) : null });
+      return json({ plan: app ? PAY.portalPlan(app, { dealTotal: (await dealPaid(app)) ?? null, schema }) : null });
     }
     if (req.method === "POST" && route === "plan-link") {
       const b = await req.json();
       const app = await PAY.appForPortal({ dealId: b.dealId, email: b.email });
-      if (!app || !PAY.portalPlan(app, { dealTotal: (await dealPaid(app))?.total ?? null })) return json({ error: "No payment plan for this enrolment." }, 404);
+      if (!app || !PAY.portalPlan(app, { dealTotal: (await dealPaid(app)) ?? null })) return json({ error: "No payment plan for this enrolment." }, 404);
       return json({ url: await PAY.portalLink(app) });
     }
     if (req.method === "POST" && route === "hubspot-lookup") {

@@ -38,7 +38,7 @@ export default async (req) => {
         const r = await PAY.reconcileDealAmount(app, enrolment, schema, { dealAmount: deal.amount });
         if (r?.enrolment) enr = r.enrolment;
       }
-      return json({ offer: E.offerView(app, { enrolment: enr, decision, dealTotal: deal?.total ?? null, dealAmount: deal?.amount ?? null }, schema, terms) });
+      return json({ offer: E.offerView(app, { enrolment: enr, decision, dealTotal: deal ?? null, dealAmount: deal?.amount ?? null }, schema, terms) });
     }
     if (req.method === "POST" && route === "checkout") {
       const body = await readJson(req);

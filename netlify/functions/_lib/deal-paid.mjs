@@ -22,7 +22,8 @@ export async function dealPaid(app, { fresh = false } = {}) {
     const entries = parseDealPayments(props);
     const { totalPaid } = totalPaidForDeal(props, entries);
     const amount = Number(props.amount);
-    const value = { total: totalPaid, amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null, entries: entries.map((e) => ({ index: e.index, amount: e.amount, reference: e.reference, date: e.dateIso })) };
+    // A refund row (negative amount) makes the deal's rows the up-to-date record of what's been paid.
+    const value = { total: totalPaid, refunded: entries.some((e) => Number(e.amount) < 0), amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null, entries: entries.map((e) => ({ index: e.index, amount: e.amount, reference: e.reference, date: e.dateIso })) };
     cache.set(id, { at: Date.now(), value });
     return value;
   } catch (err) {

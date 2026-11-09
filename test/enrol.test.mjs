@@ -517,6 +517,19 @@ await t('linked to a program record with no start date → falls back to the mat
   assert.match(gone2.reason, /no longer exists in HubSpot/);
 });
 
+await t('a refund on the deal ("-250, refunded by mistake") counts: paid drops, the deposit and pay-in-full amounts go up to match', async () => {
+  const { id, token, deal } = await acceptedApp('refund@x.org');
+  const PAY = await import('../netlify/functions/_lib/payments.mjs');
+  await PAY.markDepositPaid(id, { amount: 2250, reference: 'Wise 1', by: 'Megan' }, schema, { log: quiet });
+  Object.assign(up.crm.deals.get(deal).properties, { amount: '15500', payment_1: '250, pi_fee, 19-10-2026', payment_2: '2250, 20261016I1Q73AGC005831, 2026-10-17', payment_3: '-250, refunded by mistake' });
+  const { __clearDealPaidCache } = await import('../netlify/functions/_lib/deal-paid.mjs'); __clearDealPaidCache();
+  const o = (await offer(token)).body.offer;
+  assert.equal(o.paid, 2250, 'the refund is taken off');
+  assert.equal(o.deposit, 250, '$250 still to pay toward the deposit');
+  assert.equal(o.prepaid, undefined, 'not treated as a full deposit any more');
+  assert.equal(o.options.find((x) => x.key === 'full').payments[0].amount, 15500 - 2250);
+});
+
 up.restore();
 await pool.end();
 console.log(`enrol: ${n} passed`);
