@@ -58,10 +58,12 @@ export async function syncQuiz(id, { schema, inline = false, force = false } = {
   try {
     const out = await HSF.submitAndAttribute({
       formGuid: String(sc.settings?.hubspotFormGuid || process.env.HUBSPOT_QUIZ_FORM_GUID || "").trim(),
-      fields: { email: r.email, firstname: r.first_name || "", lastname: r.last_name || "", phone },
+      // The HubSpot form only has email + names (pd-dashboard creates it that way);
+      // the phone goes on the contact through the CRM below.
+      fields: { email: r.email, firstname: r.first_name || "", lastname: r.last_name || "" },
       attr: r.attribution || {}, ip: r.ip, conversion: "Gap year quiz", waitMs: inline ? 6000 : 30000,
       alreadySubmitted: !!r.sync?.form?.ok, resetLeadStatus: true,
-      extraProps: { ...Q.quizContactProps(sc, answers, r.archetype, { date: new Date(r.created_at).toISOString().slice(0, 10) }), lifecyclestage: "lead", company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery" },
+      extraProps: { ...Q.quizContactProps(sc, answers, r.archetype, { date: new Date(r.created_at).toISOString().slice(0, 10) }), lifecyclestage: "lead", ...(phone ? { phone } : {}), company_tag: process.env.HUBSPOT_COMPANY_TAG || "Pacific Discovery" },
     });
     await setSync(r.id, {
       form: { ok: out.formOk, error: out.formError || undefined, at: new Date().toISOString() },

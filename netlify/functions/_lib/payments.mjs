@@ -33,6 +33,7 @@ import { mailOn, alertOn, sendFamily, sendAdmissionsAlert, formatUsd as usd } fr
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { acceptLink, paidSoFar, payOffSaving, familyDiscounts, wireReference, discountsUntil } from "./enrol.mjs";
 import { dealPaid } from "./deal-paid.mjs";
+import { trackDepositOnce } from "./deposit-tracking.mjs";
 
 const DAY = 864e5;
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -1044,6 +1045,8 @@ async function recordPrepaid(app, { total, deposit = null, reference = "", by = 
   try { email = await familyEmail(app, schema, "choosePlan", { deposit: usd(amt) }, { log }); }
   catch (err) { log.error?.("[mark deposit email]", err.message); email = { error: String(err.message).slice(0, 300) }; }
   await patchEnrolment(appId, { prepaidEmail: email });
+  // The real purchase → Meta + TikTok (once per application).
+  await trackDepositOnce(appId, { log });
   return { prepaid: true, amount: amt, total, stage, email };
 }
 

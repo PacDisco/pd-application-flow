@@ -216,6 +216,56 @@ built-in templates, or add the vendor to `/tracking.js` (and its domains to the 
 **Check it:** set `META_TEST_EVENT_CODE`, take the quiz, and watch *Test events*
 in Events Manager. Each event should show *Browser* and *Server*, de-duplicated.
 
+### The deposit — tracking through to the real purchase
+
+The app fee (`Purchase`, $250) is not the sale. The deposit is, and it's paid
+days or weeks later on the acceptance page, by wire, or found on the HubSpot
+deal, often by a parent on another device. No browser tag sees it, so it's sent
+from the server, **once per application** whichever way it arrives
+(`_lib/deposit-tracking.mjs`, claimed atomically on `enrolment.adsDeposit`;
+the result per platform is stored there too).
+
+**Meta + TikTok** (same pixel / tokens as above):
+
+| Variable | Default | |
+|---|---|---|
+| `META_DEPOSIT_EVENT` | `DepositPaid` | custom event, so campaigns optimising on `Purchase` (the app fee) are unaffected. Create a custom conversion on it in Events Manager. Set `Purchase` only if you want Meta to optimise on deposits |
+| `TIKTOK_DEPOSIT_EVENT` | `PlaceAnOrder` | |
+| `DEPOSIT_VALUE` | `tuition` | value sent: the program price the deposit commits to (real return on ad spend), or `deposit` for the amount paid |
+
+Matched on hashed email / phone / name plus the `fbclid`/`ttclid` and `_fbp`/`_ttp`
+the application stored at step 1. Event ID `dep_…` (stable per application).
+
+**Google Ads: offline conversions feed.** `GET /api/ads/google-conversions.csv`
+(Basic auth) lists every conversion with a Google click id (gclid from the
+`pd_attr` cookie at step 1) from the last 90 days, in Google's upload format.
+Google Ads fetches it daily, so no Ads API developer token is needed.
+
+1. Google Ads → Goals → Conversions → **New conversion action → Import → CRM / files → Track conversions from clicks**.
+   Make one called e.g. `PD Deposit` (category Purchase, value "Use different values", count **One**).
+   Optionally `PD Application (offline)` and `PD App Fee (offline)`, but **not** for an event that already
+   fires in the browser via `GOOGLE_ADS_LABELS`, or it counts twice. Set offline ones you don't bid on as *Secondary*.
+2. Netlify env on this site:
+
+   | Variable | Value |
+   |---|---|
+   | `GOOGLE_ADS_OFFLINE_NAMES` | `deposit_paid=PD Deposit` (add `application_submit=…`, `application_fee_paid=…` if used). Names must match exactly |
+   | `GOOGLE_ADS_FEED_USER` | e.g. `google-ads` |
+   | `GOOGLE_ADS_FEED_PASSWORD` | 16+ characters (`openssl rand -hex 16`) |
+   | `GOOGLE_ADS_FEED_EMAIL` | optional `on` — adds a hashed Email column (enhanced conversions for leads). Enable that in Google Ads first |
+
+3. Google Ads → Goals → **Uploads → Schedules → +** → Source **HTTPS**, URL
+   `https://apply.pacificdiscovery.org/api/ads/google-conversions.csv`, the username/password above, daily.
+   Re-uploads are safe: each row has an Order ID (`dep_<application id>`), and Google ignores duplicates.
+
+Check it: open the URL in a browser (it asks for the password). Rows appear once an applicant who
+arrived with a gclid submits / pays. Only applications made through pd-apply are included (old Jotform
+applicants have no stored click).
+
+**Bid on applications, report on deposits.** About 50 deposits a year is too few for Smart Bidding to
+optimise on. Keep the primary conversion on `application_submit` or `application_fee_paid`, and use
+`PD Deposit` (secondary) for value and return-on-ad-spend reporting.
+
 ### HubSpot forms on the main site (program booklet, …)
 
 `/hs-form-tracking.js` tracks HubSpot forms embedded on www.pacificdiscovery.org.

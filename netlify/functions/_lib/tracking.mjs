@@ -296,3 +296,54 @@ export function siteFormEvent(body, { ip, userAgent } = {}) {
     }),
   };
 }
+
+// ── The deposit (the real purchase) ─────────────────────────────────────────
+// Sent once per application, whichever way the deposit arrives: the acceptance
+// page (Stripe card / bank), admissions marking a wire as paid, or a payment
+// found on the HubSpot deal. The family may pay on another device weeks after
+// the ad click, so this is server-only — matched on hashed email / phone and
+// the click ids the application stored at step 1.
+//
+//   META_DEPOSIT_EVENT     default "DepositPaid" (a custom event, so it doesn't
+//                          change what campaigns optimising on "Purchase" (the
+//                          app fee) learn from). Set "Purchase" to make it one.
+//   TIKTOK_DEPOSIT_EVENT   default "PlaceAnOrder"
+//   DEPOSIT_VALUE          "tuition" (default — the program price the deposit
+//                          commits to, for real return-on-ad-spend) or "deposit"
+
+/** Stable event ID for the deposit (one per application). */
+export function depositEventId(appId) {
+  return appId ? `dep_${sha(`pd-apply-deposit:${appId}`).slice(0, 24)}` : null;
+}
+
+/** What the deposit is worth to the ad platforms. Pure (tested). */
+export function depositValue({ deposit, tuition }) {
+  const mode = env("DEPOSIT_VALUE").toLowerCase() || "tuition";
+  const t = Number(tuition) || 0;
+  const d = Number(deposit) || 0;
+  return mode === "deposit" || !t ? d : t;
+}
+
+/** Server-side deposit event to Meta + TikTok. Never throws. */
+export async function trackDeposit(app, { deposit, tuition, currency = "USD", reference, at } = {}) {
+  if (!app) return { skipped: "no app" };
+  const metaName = env("META_DEPOSIT_EVENT") || "DepositPaid";
+  const tiktokName = env("TIKTOK_DEPOSIT_EVENT") || "PlaceAnOrder";
+  const args = {
+    eventId: depositEventId(app.id),
+    time: at,
+    sourceUrl: `${(process.env.APPLY_SITE_URL || process.env.URL || "").replace(/\/+$/, "")}/accept`,
+    person: { email: app.email, phone: phoneOf(app.answers?.mobile), first: app.first_name, last: app.last_name, externalId: norm(app.email) },
+    attr: app.attribution || {}, ip: app.ip, userAgent: app.user_agent,
+    custom: {
+      content_name: app.program || undefined, content_category: app.program_type || undefined, term: app.term || undefined,
+      value: depositValue({ deposit, tuition }), currency: String(currency).toUpperCase(),
+      order_id: reference || undefined, deposit: Number(deposit) || undefined,
+    },
+  };
+  const [meta, tiktok] = await Promise.all([
+    sendMeta(buildMetaEvent({ ...args, name: metaName })).catch((e) => ({ ok: false, error: e.message })),
+    sendTikTok(buildTikTokEvent({ ...args, name: tiktokName })).catch((e) => ({ ok: false, error: e.message })),
+  ]);
+  return { meta, tiktok };
+}

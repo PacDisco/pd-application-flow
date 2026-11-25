@@ -29,6 +29,7 @@ import { mailOn, alertOn, sendEnrolled, sendDepositAlert, sendFamily, sendAdmiss
 import { logFamilyEmail, hubspotOn } from "./email-log.mjs";
 import { publishedTermsOrNull } from "./terms.mjs";
 import { dealPaid } from "./deal-paid.mjs";
+import { trackDepositOnce } from "./deposit-tracking.mjs";
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 const DAY = 864e5;
@@ -424,6 +425,8 @@ export async function recordDeposit(session, schema, { log = console } = {}) {
   }
   if (alertOn()) { try { await sendDepositAlert(app, now); } catch (err) { log.error?.("[enrol alert]", err.message); } }
   await patchEnrolment(app.id, { emails, ...(patch.hubspot ? { hubspot: patch.hubspot } : {}), ...(dealAmount ? { dealAmount } : {}) });
+  // The real purchase → Meta + TikTok (once; a deposit paid outside Stripe was already sent when it was recorded).
+  await trackDepositOnce(app.id, { log });
   return { first: true, enrolment: { ...now, emails } };
 }
 
