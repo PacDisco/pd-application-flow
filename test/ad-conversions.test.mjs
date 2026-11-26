@@ -59,13 +59,15 @@ await t('feed rows: unlisted events, no gclid, future, and outside the 90-day wi
   assert.equal(G.feedRows([old], { deposit_paid: 'D' }, { now }).length, 0, 'deposit more than 90 days after the click');
 });
 
-await t('csv: Google template, UTC, quoting, optional hashed email', () => {
+await t('csv: Data Manager format by default, legacy on request, optional hashed email', () => {
   const rows = G.feedRows([app()], G.parseNames('deposit_paid=PD Deposit "won"'), { now });
-  const out = G.toCsv(rows, { withEmail: true }).trim().split('\n');
-  assert.equal(out[0], 'Parameters:TimeZone=+0000');
-  assert.equal(out[1], 'Google Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency,Order ID,Email');
-  assert.equal(out[2], `${GCLID},PD Deposit won,2026-11-20 09:30:00,15500.00,USD,dep_a1,${sha('kid@example.com')}`);
-  assert.equal(G.toCsv([]).trim().split('\n').length, 2);
+  const dm = G.toCsv(rows, { withEmail: true }).trim().split('\n');
+  assert.equal(dm[0], 'Google Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency,Order ID,Event Source,Email');
+  assert.equal(dm[1], `${GCLID},PD Deposit won,2026-11-20 09:30:00+00:00,15500.00,USD,dep_a1,WEB,${sha('kid@example.com')}`);
+  const legacy = G.toCsv(rows, { format: 'legacy' }).trim().split('\n');
+  assert.equal(legacy[0], 'Parameters:TimeZone=+0000');
+  assert.equal(legacy[2], `${GCLID},PD Deposit won,2026-11-20 09:30:00,15500.00,USD,dep_a1`);
+  assert.equal(G.toCsv([]).trim().split('\n').length, 1);
 });
 
 await t('feed endpoint: refuses without the right Basic auth', async () => {

@@ -254,8 +254,11 @@ Google Ads fetches it daily, so no Ads API developer token is needed.
    | `GOOGLE_ADS_FEED_PASSWORD` | 16+ characters (`openssl rand -hex 16`) |
    | `GOOGLE_ADS_FEED_EMAIL` | optional `on` — adds a hashed Email column (enhanced conversions for leads). Enable that in Google Ads first |
 
-3. Google Ads → Goals → **Uploads → Schedules → +** → Source **HTTPS**, URL
+3. Google Ads → Tools → **Data manager → + Connect → HTTPS** (conversions → offline), URL
    `https://apply.pacificdiscovery.org/api/ads/google-conversions.csv`, the username/password above, daily.
+   Map: Conversion Time → Conversion date/time, Order ID → Row identifier, Event Source → Event source,
+   Google Click ID → GCLID, Conversion Name / Value / Currency → the same. (The older Uploads → Schedules
+   screen wants `?format=legacy` on the URL.)
    Re-uploads are safe: each row has an Order ID (`dep_<application id>`), and Google ignores duplicates.
 
 Check it: open the URL in a browser (it asks for the password). Rows appear once an applicant who

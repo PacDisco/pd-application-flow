@@ -31,7 +31,8 @@ export default async (req) => {
          FROM applications
         WHERE attribution IS NOT NULL AND created_at > now() - interval '200 days'
         ORDER BY created_at`);
-    const body = toCsv(feedRows(apps, names), { withEmail: ["on", "1", "true", "yes"].includes(String(process.env.GOOGLE_ADS_FEED_EMAIL || "").toLowerCase()) });
+    const format = new URL(req.url).searchParams.get("format") === "legacy" ? "legacy" : "dm";
+    const body = toCsv(feedRows(apps, names), { format, withEmail: ["on", "1", "true", "yes"].includes(String(process.env.GOOGLE_ADS_FEED_EMAIL || "").toLowerCase()) });
     return new Response(req.method === "HEAD" ? null : body, {
       status: 200,
       headers: { "Content-Type": "text/csv; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex" },

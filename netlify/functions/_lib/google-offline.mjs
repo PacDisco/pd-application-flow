@@ -1,5 +1,5 @@
 // Google Ads offline conversions — a CSV feed Google Ads fetches on a schedule
-// (Goals → Uploads → Schedules → Source: HTTPS). No Google Ads API developer
+// (Google Ads Data manager → HTTPS source; add ?format=legacy for the older Uploads → Schedules). No Google Ads API developer
 // token needed.
 //
 // Why: the deposit happens days or weeks after the ad click, usually on the
@@ -95,13 +95,21 @@ export function feedRows(apps, names, { now = new Date(), valueMode = env("DEPOS
   return rows;
 }
 
-/** The CSV Google Ads expects (times in UTC). */
-export function toCsv(rows, { withEmail = false } = {}) {
+/**
+ * The CSV Google Ads expects.
+ *   format "dm" (default) — Google Ads Data Manager: one header row, times with
+ *     their time zone ("2026-11-20 09:30:00+00:00"), plus Event Source.
+ *   format "legacy" — the older Uploads → Schedules template (Parameters line).
+ */
+export function toCsv(rows, { withEmail = false, format = "dm" } = {}) {
+  const legacy = format === "legacy";
   const head = ["Google Click ID", "Conversion Name", "Conversion Time", "Conversion Value", "Conversion Currency", "Order ID"];
+  if (!legacy) head.push("Event Source");
   if (withEmail) head.push("Email");
-  const lines = ["Parameters:TimeZone=+0000", head.join(",")];
+  const lines = legacy ? ["Parameters:TimeZone=+0000", head.join(",")] : [head.join(",")];
   for (const r of rows) {
-    const cells = [r.gclid, r.name, r.time, r.value.toFixed(2), r.currency, r.orderId];
+    const cells = [r.gclid, r.name, legacy ? r.time : `${r.time}+00:00`, r.value.toFixed(2), r.currency, r.orderId];
+    if (!legacy) cells.push("WEB");
     if (withEmail) cells.push(r.email ? sha(String(r.email).trim().toLowerCase()) : "");
     lines.push(cells.map(csv).join(","));
   }
